@@ -44,6 +44,32 @@ def prepare_data(ticker="AAPL", target_days=5):
     data.ta.rsi(length=14, append=True) # 14-day RSI (creates 'RSI_14')
     data.ta.macd(fast=12, slow=26, signal=9, append=True) # MACD // this is what dictates if there has been optimism lately
 
+    """ Bollinger Bands: Upper and lower bands around the SMA based on volatility.
+        When price touches the upper band, it might be overbought (expensive).
+        When it touches the lower band, it might be oversold (cheap).
+        We store the width of the band (upper - lower) as a measure of volatility.
+    """
+    bollinger = ta.bbands(data['Close'], length=20, std=2)
+    data['BB_Upper'] = bollinger['BBU_20_2.0']
+    data['BB_Lower'] = bollinger['BBL_20_2.0']
+    data['BB_Width'] = (data['BB_Upper'] - data['BB_Lower']) / data['Close']  # Normalized width
+
+    """ ATR (Average True Range): Measures the average size of price movements.
+        Unlike volatility (which uses returns), ATR uses actual price ranges (High - Low).
+        High ATR = big daily swings = more volatile market.
+    """
+    data.ta.atr(length=14, append=True)  # Creates 'ATRr_14'
+
+    """ Stochastic Oscillator: Compares the closing price to the price range over a period.
+        %K = where is the price relative to the high/low range (0-100)
+        %D = smoothed version of %K (signal line)
+        Above80 = overbought, below20 = oversold.
+        Useful for spotting reversals.
+    """
+    stoch = ta.stoch(data['High'], data['Low'], data['Close'])
+    data['Stoch_K'] = stoch['STOCHk_14_3_3']
+    data['Stoch_D'] = stoch['STOCHd_14_3_3']
+
     # Calculate Distance to 52-week high (252 trading days)
     rolling_52w_high = data['High'].rolling(window=252).max()
     data['Dist_52w_High_%'] = (data['Close'] - rolling_52w_high) / rolling_52w_high
