@@ -50,8 +50,8 @@ def prepare_data(ticker="AAPL", target_days=5):
         We store the width of the band (upper - lower) as a measure of volatility.
     """
     bollinger = ta.bbands(data['Close'], length=20, std=2)
-    data['BB_Upper'] = bollinger['BBU_20_2.0']
-    data['BB_Lower'] = bollinger['BBL_20_2.0']
+    data['BB_Upper'] = bollinger['BBU_20_2.0_2.0']
+    data['BB_Lower'] = bollinger['BBL_20_2.0_2.0']
     data['BB_Width'] = (data['BB_Upper'] - data['BB_Lower']) / data['Close']  # Normalized width
 
     """ ATR (Average True Range): Measures the average size of price movements.
