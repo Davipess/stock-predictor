@@ -7,7 +7,20 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from xgboost import XGBClassifier
 from scipy.stats import randint, uniform
 
-def prepare_data(ticker="AAPL", target_days=5):
+CONFIG = {
+    'ticker': 'AAPL',           # Stock ticker to predict
+    'target_days': 5,           # Days ahead to predict (5 = 1 week)
+    'data_years': 5,            # Years of history to fetch
+    'n_splits_cv': 5,           # Folds for cross-validation
+    'feature_threshold': 0.02,  # Min importance to keep a feature (0.02 = 2%)
+    'n_iter_tuning': 200,        # Hyperparameter combinations to test
+    'random_ticker_columns': [  # Raw price columns to remove (data leakage)
+        'Close', 'High', 'Low', 'Open',
+        'SMA_20', 'SMA_50'
+    ],
+}
+
+def prepare_data(ticker=None, target_days=None):
 
     """ Fetch 5 years of history instead of 2.
         More data = more patterns for the model to learn from.
@@ -16,8 +29,15 @@ def prepare_data(ticker="AAPL", target_days=5):
         yf.download() fetches multiple tickers at once and aligns their dates.
         This avoids the NaN problem where different tickers had different date formats.
     """
+    if ticker is None:
+        ticker = CONFIG['ticker']
+    if target_days is None:
+        target_days = CONFIG['target_days']
+    
+    years = CONFIG['data_years']
+    period = f"{years}y"
     tickers = [ticker, "^GSPC", "^VIX"]
-    raw_data = yf.download(tickers, period="5y", progress=False)
+    raw_data = yf.download(tickers, period=period, progress=False)
     
     """ yf.download() returns a DataFrame with MultiIndex columns like (Close, AAPL).
         We extract each ticker's Close price and build our main DataFrame from the stock.
@@ -224,11 +244,12 @@ def tune_hyperparameters(dataset, target_col, n_splits=3):
         scoring='f1' optimizes for F1-score (balance of precision and recall).
         n_jobs=-1 uses all CPU cores (faster).
     """
-    print(f"\nTuning hyperparameters (testing50 random combinations)...")
+    n_iter = CONFIG['n_iter_tuning']
+    print(f"\nTuning hyperparameters (testing {n_iter} random combinations)...")
     random_search = RandomizedSearchCV(
         estimator=base_model,
         param_distributions=param_distributions,
-        n_iter=50, # Test 50 random combinations
+        n_iter=n_iter,            # Test N random combinations
         cv=tscv,
         scoring='f1',
         random_state=42,
@@ -305,21 +326,75 @@ def train_baseline_model(dataset, target_col, n_splits=3):
     
     return model
 
+def select_features(dataset, target_col, threshold=None):
+    """  
+        Uses feature_importances_ from XGBoost to rank features.
+        Features with importance below the threshold are removed.
+        Also removes raw price columns (data leakage).
+        
+        Trains XGBoost on the data, each feature gets an importance score (how much it helps predictions)
+        Features with very low importance are noise, they confuse the model
+        We remove them and retrain with only the useful features
+    """
+    if threshold is None:
+        threshold = CONFIG['feature_threshold']
+    
+    # Remove raw price columns (data leakage)
+    columns_to_remove = CONFIG['random_ticker_columns']
+    existing_to_remove = [col for col in columns_to_remove if col in dataset.columns]
+    dataset = dataset.drop(columns=existing_to_remove, errors='ignore')
+    print(f"\nRemoved raw price columns: {existing_to_remove}")
+
+    X = dataset.drop(columns=[target_col])
+    y = dataset[target_col]
+
+    # Train a model to get feature importances
+    model = XGBClassifier(eval_metric='logloss', random_state=42)
+    model.fit(X, y)
+
+    """ Get importance scores and sort them from highest to lowest.
+        Importance = how much each feature contributes to the model's decisions.
+    """
+    importances = pd.Series(model.feature_importances_, index=X.columns)
+    importances = importances.sort_values(ascending=False)
+
+    print(f"\n--- Feature Importance Ranking ---")
+    for feature, importance in importances.items():
+        status = "KEEP" if importance >= threshold else "REMOVE"
+        print(f"  {feature}: {importance:.4f} [{status}]")
+
+    """ Select only features above the threshold.
+        These are the features that actually help the model predict.
+    """
+    important_features = importances[importances >= threshold].index.tolist()
+    
+    print(f"\nKeeping {len(important_features)} out of {len(X.columns)} features")
+    print(f"Removed {len(X.columns) - len(important_features)} noisy features")
+
+    # Return dataset with only important features
+    filtered_dataset = dataset[important_features + [target_col]]
+    return filtered_dataset, important_features
+
 def main():
     print("Starting Stock Predictor Pipeline...")
-    dataset, target_col = prepare_data(ticker="AAPL", target_days=5)
+    print(f"Ticker: {CONFIG['ticker']} | Target: {CONFIG['target_days']} days | Data: {CONFIG['data_years']} years")
+    
+    dataset, target_col = prepare_data()
     
     check_class_balance(dataset, target_col)
     
     print(f"\nDataset shape: {dataset.shape[0]} rows, {dataset.shape[1]} columns")
     print(f"Features: {list(dataset.columns)}")
     
-    # Find the best hyperparameters
-    best_model = tune_hyperparameters(dataset, target_col, n_splits=3)
+    # Remove raw price columns and noisy features
+    filtered_dataset, kept_features = select_features(dataset, target_col)
+    
+    # Find the best hyperparameters on filtered data
+    best_model = tune_hyperparameters(filtered_dataset, target_col, n_splits=CONFIG['n_splits_cv'])
     
     # Train the final model with the best parameters
     print("\nTraining final model with best parameters...")
-    trained_model = train_baseline_model(dataset, target_col, n_splits=5)
+    trained_model = train_baseline_model(filtered_dataset, target_col, n_splits=CONFIG['n_splits_cv'])
     
     print("\nPipeline execution finished successfully!")
 
