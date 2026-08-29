@@ -94,6 +94,43 @@ def prepare_data(ticker="AAPL", target_days=5):
     data['SP500_Ret'] = data['SP500_Close'].pct_change(periods=1)
     data['Corr_SP500_20d'] = data['Ret_1d'].rolling(window=20).corr(data['SP500_Ret'])
 
+    """ Different rolling windows for volatility and volume.
+        Short windows (10d) = react fast to changes
+        Long windows (50d) = smoother, less noise
+    """
+    data['Volatility_10d'] = data['Ret_1d'].rolling(window=10).std()
+    data['Volatility_50d'] = data['Ret_1d'].rolling(window=50).std()
+    
+    data['Rel_Volume_10d'] = data['Volume'] / data['Volume'].rolling(window=10).mean()
+    data['Rel_Volume_50d'] = data['Volume'] / data['Volume'].rolling(window=50).mean()
+
+    """ Different rolling windows for SMA.
+        Comparing SMA_20 vs SMA_50 tells us about trend strength.
+    """
+    data.ta.sma(length=50, append=True)  # Creates 'SMA_50'
+
+    """ RSI rate of change: Is RSI rising or falling?
+        RSI going from30 to40 (rising) is bullish momentum.
+        RSI going from70 to60 (falling) is bearish momentum.
+    """
+    data['RSI_Change'] = data['RSI_14'] - data['RSI_14'].shift(1)
+
+    """ Stochastic rate of change: Same logic as RSI.
+    """
+    data['Stoch_K_Change'] = data['Stoch_K'] - data['Stoch_K'].shift(1)
+
+    """ Feature interactions: Combine features to reveal hidden patterns.
+        Example: RSI high + Volume high = strong overbought with conviction
+    """
+    data['RSI_x_Volume'] = data['RSI_14'] * data['Rel_Volume']
+    data['MACD_x_Volume'] = data['MACD_12_26_9'] * data['Rel_Volume']
+
+    """ Price relative to moving averages.
+        How far is the price from its average? Far above = potentially overextended.
+    """
+    data['Price_vs_SMA20'] = (data['Close'] - data['SMA_20']) / data['SMA_20']
+    data['Price_vs_SMA50'] = (data['Close'] - data['SMA_50']) / data['SMA_50']
+
     print(f"DEBUG: Raw data rows: {len(data)}")
 
     # Clean up rows with missing values
