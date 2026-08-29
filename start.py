@@ -2,9 +2,10 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
+from scipy.stats import randint, uniform
 
 def prepare_data(ticker="AAPL", target_days=5):
 
@@ -184,6 +185,66 @@ def check_class_balance(dataset, target_col):
     else:
         print(f"  Dataset is well balanced.")
 
+def tune_hyperparameters(dataset, target_col, n_splits=3):
+    """  
+        RandomizedSearchCV tests random combinations of hyperparameters.
+        Instead of trying every combination (GridSearch), it samples random ones.
+        This is faster and usually finds good enough parameters.
+        
+        Key parameters we're tuning:
+        - n_estimators: How many trees to build (more = more complex, risk of overfitting)
+        - max_depth: How deep each tree can go (deeper = more complex patterns)
+        - learning_rate: How fast the model learns (slower = more careful, needs more trees)
+        - subsample: Fraction of data used for each tree (prevents overfitting)
+        - colsample_bytree: Fraction of features used for each tree (prevents overfitting)
+    """
+    X = dataset.drop(columns=[target_col])
+    y = dataset[target_col]
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    """ Define the parameter distributions to sample from.
+        Each parameter has a range of values to try.
+    """
+    param_distributions = {
+        'n_estimators': randint(50, 300),
+        'max_depth': randint(3, 10),
+        'learning_rate': uniform(0.01, 0.3),
+        'subsample': uniform(0.6, 0.4),
+        'colsample_bytree': uniform(0.6, 0.4),
+        'min_child_weight': randint(1, 10),
+        'gamma': uniform(0, 0.5),
+    }
+
+    # Initialize base model
+    base_model = XGBClassifier(eval_metric='logloss', random_state=42)
+
+    """ RandomizedSearchCV: Tests n_iter random combinations.
+        cv=tscv uses time series split instead of random split.
+        scoring='f1' optimizes for F1-score (balance of precision and recall).
+        n_jobs=-1 uses all CPU cores (faster).
+    """
+    print(f"\nTuning hyperparameters (testing50 random combinations)...")
+    random_search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=param_distributions,
+        n_iter=50, # Test 50 random combinations
+        cv=tscv,
+        scoring='f1',
+        random_state=42,
+        n_jobs=-1
+    )
+
+    random_search.fit(X, y)
+
+    # Print the best parameters found
+    print(f"\nBest parameters found:")
+    for param, value in random_search.best_params_.items():
+        print(f"  {param}: {value}")
+    print(f"Best F1-Score: {random_search.best_score_:.3f}")
+
+    return random_search.best_estimator_
+
 def train_baseline_model(dataset, target_col, n_splits=3):
     """  
         Splits the data chronologically to prevent lookahead bias and trains an XGBoost model.
@@ -253,6 +314,11 @@ def main():
     print(f"\nDataset shape: {dataset.shape[0]} rows, {dataset.shape[1]} columns")
     print(f"Features: {list(dataset.columns)}")
     
+    # Find the best hyperparameters
+    best_model = tune_hyperparameters(dataset, target_col, n_splits=3)
+    
+    # Train the final model with the best parameters
+    print("\nTraining final model with best parameters...")
     trained_model = train_baseline_model(dataset, target_col, n_splits=5)
     
     print("\nPipeline execution finished successfully!")
