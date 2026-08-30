@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -9,11 +10,11 @@ from scipy.stats import randint, uniform
 
 CONFIG = {
     'ticker': 'AAPL',           # Stock ticker to predict
-    'target_days': 5,           # Days ahead to predict (5 = 1 week)
-    'data_years': 5,            # Years of history to fetch
+    'target_days': 10,           # Days ahead to predict (5 = 1 week)
+    'data_years': 10,            # Years of history to fetch
     'n_splits_cv': 5,           # Folds for cross-validation
     'feature_threshold': 0.02,  # Min importance to keep a feature (0.02 = 2%)
-    'n_iter_tuning': 200,        # Hyperparameter combinations to test
+    'n_iter_tuning': 100,        # Hyperparameter combinations to test
     'random_ticker_columns': [  # Raw price columns to remove (data leakage)
         'Close', 'High', 'Low', 'Open',
         'SMA_20', 'SMA_50'
@@ -221,6 +222,11 @@ def tune_hyperparameters(dataset, target_col, n_splits=3):
     X = dataset.drop(columns=[target_col])
     y = dataset[target_col]
 
+    # Calculate class weights for imbalance handling
+    n_down = (y == 0).sum()
+    n_up = (y == 1).sum()
+    scale_pos_weight = n_down / n_up
+
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
     """ Define the parameter distributions to sample from.
@@ -234,10 +240,11 @@ def tune_hyperparameters(dataset, target_col, n_splits=3):
         'colsample_bytree': uniform(0.6, 0.4),
         'min_child_weight': randint(1, 10),
         'gamma': uniform(0, 0.5),
+        'scale_pos_weight': uniform(0.5, 1.5),  # Tune class weight
     }
 
-    # Initialize base model
-    base_model = XGBClassifier(eval_metric='logloss', random_state=42)
+    # Initialize base model with class weight handling
+    base_model = XGBClassifier(eval_metric='logloss', random_state=42, scale_pos_weight=scale_pos_weight)
 
     """ RandomizedSearchCV: Tests n_iter random combinations.
         cv=tscv uses time series split instead of random split.
@@ -266,10 +273,13 @@ def tune_hyperparameters(dataset, target_col, n_splits=3):
 
     return random_search.best_estimator_
 
-def train_baseline_model(dataset, target_col, n_splits=3):
+def train_baseline_model(dataset, target_col, model, n_splits=3):
     """  
-        Splits the data chronologically to prevent lookahead bias and trains an XGBoost model.
-        Now includes Precision, Recall, and F1-Score for better evaluation.
+        Splits the data chronologically to prevent lookahead bias and trains the model.
+        Now includes Precision, Recall, and F1-Score for evaluation.
+        
+        The model is passed as parameter (from tune_hyperparameters) instead of being
+        created inside this function. This ensures we train with the best parameters found.
     """
     # Separate Features/Numbers (X) from the Target (y)
 
@@ -282,10 +292,7 @@ def train_baseline_model(dataset, target_col, n_splits=3):
     """
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
-    # Initialize the XGBoost Classifier
-    model = XGBClassifier(eval_metric='logloss', random_state=42)
-
-    print(f"\nTraining XGBoost Model to predict {target_col}...")
+    print(f"\nTraining Model to predict {target_col}...")
 
     fold = 1
     all_accuracies = []
@@ -375,6 +382,118 @@ def select_features(dataset, target_col, threshold=None):
     filtered_dataset = dataset[important_features + [target_col]]
     return filtered_dataset, important_features
 
+def backtest(model, dataset, target_col, ticker=None):
+    """
+        Simulates three trading strategies and compares their performance:
+        
+        -Model Strategy: Buy when model predicts Up (1), sell when predicts Down (0)
+        -S&P 500 Buy & Hold: Buy on day 1, hold forever (benchmark)
+        -Random Strategy: Randomly buy/sell (to show that any strategy beats randomness)
+        
+        The chart shows cumulative returns over time for all three strategies.
+    """
+    if ticker is None:
+        ticker = CONFIG['ticker']
+    
+    # Fetch S&P 500 data for the same period
+    # .squeeze() converts single-column DataFrame to Series
+    sp500_data = yf.download("^GSPC", period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
+    
+    # Get the stock's close prices aligned with our dataset
+    stock_data = yf.download(ticker, period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
+    
+    # Prepare features and make predictions
+    X = dataset.drop(columns=[target_col])
+    predictions = model.predict(X)
+    
+    """ Add predictions and dates to the stock price data.
+        We need to align the predictions with the actual dates and prices.
+    """
+    results = pd.DataFrame({
+        'Price': stock_data.loc[dataset.index].values,
+        'Prediction': predictions,
+        'Actual': dataset[target_col].values
+    }, index=dataset.index)
+    
+    """ Calculate daily returns for each strategy:
+        
+        Model Strategy:
+        - If prediction is1 (Up): stay invested, earn the return
+        - If prediction is0 (Down): cash out, earn0
+        
+        S&P 500:
+        - Always invested, earn the market return
+        
+        Random:
+        - Randomly decide to be invested or cash (50/50 chance)
+    """
+    import numpy as np
+    np.random.seed(42)  # For reproducibility
+    
+    results['Stock_Return'] = results['Price'].pct_change()
+    
+    # Model strategy: invest only when predicting Up
+    results['Model_Return'] = results['Stock_Return'] * results['Prediction']
+    
+    # S&P 500: get returns for the same dates
+    results['SP500_Return'] = sp500_data.loc[results.index].pct_change()
+    
+    # Random strategy: randomly invest or stay cash
+    results['Random_Decision'] = np.random.randint(0, 2, size=len(results))
+    results['Random_Return'] = results['Stock_Return'] * results['Random_Decision']
+    
+    """ Calculate cumulative returns (growth of $1 invested).
+        Cumulative return = (1 + r1) * (1 + r2) * ... * (1 + rn)
+        This shows how $1 would have grown over time.
+    """
+    results['Model_Cumulative'] = (1 + results['Model_Return']).cumprod()
+    results['SP500_Cumulative'] = (1 + results['SP500_Return']).cumprod()
+    results['Random_Cumulative'] = (1 + results['Random_Return']).cumprod()
+    
+    """ Print performance summary.
+        Total return = final value - initial value (as percentage)
+    """
+    model_total = (results['Model_Cumulative'].iloc[-1] - 1) * 100
+    sp500_total = (results['SP500_Cumulative'].iloc[-1] - 1) * 100
+    random_total = (results['Random_Cumulative'].iloc[-1] - 1) * 100
+    
+    print(f"\n{'='*50}")
+    print(f"BACKTEST RESULTS ({len(results)} trading days)")
+    print(f"{'='*50}")
+    print(f"  Model Strategy:     {model_total:+.2f}%")
+    print(f"  S&P 500 Buy&Hold:   {sp500_total:+.2f}%")
+    print(f"  Random Strategy:    {random_total:+.2f}%")
+    print(f"{'='*50}")
+    
+    # Calculate how many days the model was invested vs cash
+    invested_days = (results['Prediction'] == 1).sum()
+    cash_days = (results['Prediction'] == 0).sum()
+    print(f"  Days Invested:      {invested_days} ({invested_days/len(results)*100:.1f}%)")
+    print(f"  Days in Cash:       {cash_days} ({cash_days/len(results)*100:.1f}%)")
+    
+    """ Plot the three strategies on the same chart.
+        This visually shows which strategy performed best over time.
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    ax.plot(results.index, results['Model_Cumulative'], label='Model Strategy', linewidth=2)
+    ax.plot(results.index, results['SP500_Cumulative'], label='S&P 500 Buy & Hold', linewidth=2, linestyle='--')
+    ax.plot(results.index, results['Random_Cumulative'], label='Random Strategy', linewidth=1, alpha=0.7, linestyle=':')
+    
+    ax.set_title(f'Backtest: Model vs S&P 500 vs Random ({ticker})')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Growth of $1')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('backtest_results.png', dpi=150)
+    plt.show()
+    
+    print(f"\nChart saved as 'backtest_results.png'")
+    
+    return results
+
 def main():
     print("Starting Stock Predictor Pipeline...")
     print(f"Ticker: {CONFIG['ticker']} | Target: {CONFIG['target_days']} days | Data: {CONFIG['data_years']} years")
@@ -392,9 +511,12 @@ def main():
     # Find the best hyperparameters on filtered data
     best_model = tune_hyperparameters(filtered_dataset, target_col, n_splits=CONFIG['n_splits_cv'])
     
-    # Train the final model with the best parameters
+    # Train the final model with the best parameters found by tuning
     print("\nTraining final model with best parameters...")
-    trained_model = train_baseline_model(filtered_dataset, target_col, n_splits=CONFIG['n_splits_cv'])
+    trained_model = train_baseline_model(filtered_dataset, target_col, model=best_model, n_splits=CONFIG['n_splits_cv'])
+    
+    # Run backtest to compare model vs S&P 500 vs Random
+    backtest_results = backtest(best_model, filtered_dataset, target_col)
     
     print("\nPipeline execution finished successfully!")
 
