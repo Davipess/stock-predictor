@@ -9,13 +9,31 @@ from xgboost import XGBClassifier
 from scipy.stats import randint, uniform
 
 CONFIG = {
-    'ticker': 'AAPL',           # Stock ticker to predict
-    'target_days': 10,           # Days ahead to predict (5 = 1 week)
+    # MIXED universe: winners, losers, and average performers
+    # This avoids survivorship bias
+    'universe': [
+        # WINNERS (large cap tech/growth)
+        'AAPL', 'MSFT', 'NVDA', 'META', 'AMZN', 'GOOGL',
+        # AVERAGE performers (steady but not spectacular)
+        'JNJ', 'PG', 'KO', 'PEP', 'WMT', 'JPM', 'V',
+        # UNDERPERFORMERS (stocks that struggled)
+        'INTC', 'BA', 'T', 'VZ', 'PFE', 'CVX', 'XOM',
+        # SMALL/MID CAP (more volatile, harder to predict)
+        'RIVN', 'PLTR', 'SOFI', 'ROKU', 'SNAP', 'PYPL', 'SQ',
+        'DKNG', 'HOOD', 'RBLX', 'COIN', 'ABNB', 'UBER',
+        'ZM', 'PTON', 'BYND', 'NIO', 'LCID', 'RIVN',
+    ],
+    'target_days': 10,           # Days ahead to predict
     'data_years': 10,            # Years of history to fetch
     'n_splits_cv': 5,           # Folds for cross-validation
-    'feature_threshold': 0.02,  # Min importance to keep a feature (0.02 = 2%)
+    'feature_threshold': 0.02,  # Min importance to keep a feature
     'n_iter_tuning': 100,        # Hyperparameter combinations to test
-    'random_ticker_columns': [  # Raw price columns to remove (data leakage)
+    'test_size': 0.2,           # % of data held out for backtest
+    'portfolio_top_n': 5,       # Buy top N stocks each rebalance
+    'rebalance_days': 10,       # Rebalance every N trading days
+    'initial_capital': 10000,   # Starting capital in $
+    'transaction_cost': 0.001,  # 0.1% cost per trade (buy or sell)
+    'random_ticker_columns': [  # Raw price columns to remove
         'Close', 'High', 'Low', 'Open',
         'SMA_20', 'SMA_50'
     ],
@@ -23,15 +41,12 @@ CONFIG = {
 
 def prepare_data(ticker=None, target_days=None):
 
-    """ Fetch 5 years of history instead of 2.
-        More data = more patterns for the model to learn from.
-        With 2 years we only had ~250 usable rows after rolling windows.
-        
+    """ Fetch data for a single stock.
         yf.download() fetches multiple tickers at once and aligns their dates.
         This avoids the NaN problem where different tickers had different date formats.
     """
     if ticker is None:
-        ticker = CONFIG['ticker']
+        ticker = CONFIG['tickers'][0]  # Default to first ticker
     if target_days is None:
         target_days = CONFIG['target_days']
     
@@ -382,141 +397,310 @@ def select_features(dataset, target_col, threshold=None):
     filtered_dataset = dataset[important_features + [target_col]]
     return filtered_dataset, important_features
 
-def backtest(model, dataset, target_col, ticker=None):
+def backtest():
     """
-        Simulates three trading strategies and compares their performance:
+        REALISTIC PORTFOLIO MANAGER BOT:
         
-        -Model Strategy: Buy when model predicts Up (1), sell when predicts Down (0)
-        -S&P 500 Buy & Hold: Buy on day 1, hold forever (benchmark)
-        -Random Strategy: Randomly buy/sell (to show that any strategy beats randomness)
+        1. Mixed universe (winners + losers + small caps) — no survivorship bias
+        2. Transaction costs on every trade (0.1% per buy/sell)
+        3. Fair benchmarks: S&P 500 AND Equal-Weight portfolio of same stocks
+        4. Tracks total costs paid
         
-        The chart shows cumulative returns over time for all three strategies.
-    """
-    if ticker is None:
-        ticker = CONFIG['ticker']
-    
-    # Fetch S&P 500 data for the same period
-    # .squeeze() converts single-column DataFrame to Series
-    sp500_data = yf.download("^GSPC", period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
-    
-    # Get the stock's close prices aligned with our dataset
-    stock_data = yf.download(ticker, period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
-    
-    # Prepare features and make predictions
-    X = dataset.drop(columns=[target_col])
-    predictions = model.predict(X)
-    
-    """ Add predictions and dates to the stock price data.
-        We need to align the predictions with the actual dates and prices.
-    """
-    results = pd.DataFrame({
-        'Price': stock_data.loc[dataset.index].values,
-        'Prediction': predictions,
-        'Actual': dataset[target_col].values
-    }, index=dataset.index)
-    
-    """ Calculate daily returns for each strategy:
-        
-        Model Strategy:
-        - If prediction is1 (Up): stay invested, earn the return
-        - If prediction is0 (Down): cash out, earn0
-        
-        S&P 500:
-        - Always invested, earn the market return
-        
-        Random:
-        - Randomly decide to be invested or cash (50/50 chance)
+        If the model can't beat a simple equal-weight portfolio of the same stocks
+        after costs, it has no real value.
     """
     import numpy as np
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(42)
     
-    results['Stock_Return'] = results['Price'].pct_change()
+    universe = CONFIG['universe']
+    test_size = CONFIG['test_size']
+    top_n = CONFIG['portfolio_top_n']
+    rebalance_days = CONFIG['rebalance_days']
+    initial_capital = CONFIG['initial_capital']
+    tx_cost = CONFIG['transaction_cost']  # 0.1% per trade
     
-    # Model strategy: invest only when predicting Up
-    results['Model_Return'] = results['Stock_Return'] * results['Prediction']
+    print(f"\n{'='*60}")
+    print(f"REALISTIC PORTFOLIO MANAGER BOT")
+    print(f"Universe: {len(universe)} stocks | Top {top_n} | Rebalance: {rebalance_days}d")
+    print(f"Transaction cost: {tx_cost*100:.1f}% per trade")
+    print(f"{'='*60}")
     
-    # S&P 500: get returns for the same dates
-    results['SP500_Return'] = sp500_data.loc[results.index].pct_change()
-    
-    # Random strategy: randomly invest or stay cash
-    results['Random_Decision'] = np.random.randint(0, 2, size=len(results))
-    results['Random_Return'] = results['Stock_Return'] * results['Random_Decision']
-    
-    """ Calculate cumulative returns (growth of $1 invested).
-        Cumulative return = (1 + r1) * (1 + r2) * ... * (1 + rn)
-        This shows how $1 would have grown over time.
+    """ Train models and get predictions + probabilities for all stocks.
     """
-    results['Model_Cumulative'] = (1 + results['Model_Return']).cumprod()
-    results['SP500_Cumulative'] = (1 + results['SP500_Return']).cumprod()
-    results['Random_Cumulative'] = (1 + results['Random_Return']).cumprod()
+    all_data = {}
     
-    """ Print performance summary.
-        Total return = final value - initial value (as percentage)
+    for ticker in universe:
+        try:
+            dataset, target_col = prepare_data(ticker=ticker)
+            
+            cols_to_remove = [c for c in CONFIG['random_ticker_columns'] if c in dataset.columns]
+            dataset = dataset.drop(columns=cols_to_remove, errors='ignore')
+            
+            split_idx = int(len(dataset) * (1 - test_size))
+            train_data = dataset.iloc[:split_idx]
+            test_data = dataset.iloc[split_idx:]
+            
+            X_train = train_data.drop(columns=[target_col])
+            y_train = train_data[target_col]
+            
+            from xgboost import XGBClassifier
+            n_down = (y_train == 0).sum()
+            n_up = (y_train == 1).sum()
+            model = XGBClassifier(
+                eval_metric='logloss', random_state=42,
+                scale_pos_weight=n_down/n_up if n_up > 0 else 1,
+                n_estimators=100, max_depth=4, learning_rate=0.05
+            )
+            model.fit(X_train, y_train)
+            
+            X_test = test_data.drop(columns=[target_col])
+            predictions = model.predict(X_test)
+            probabilities = model.predict_proba(X_test)[:, 1]
+            
+            stock_data = yf.download(ticker, period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
+            test_prices = stock_data.loc[test_data.index]
+            
+            all_data[ticker] = {
+                'predictions': pd.Series(predictions, index=test_data.index),
+                'probabilities': pd.Series(probabilities, index=test_data.index),
+                'prices': test_prices,
+                'returns': test_prices.pct_change()
+            }
+            
+            print(f"  {ticker}: OK")
+            
+        except Exception as e:
+            print(f"  {ticker}: SKIPPED ({e})")
+            continue
+    
+    if not all_data:
+        print("ERROR: No stocks processed.")
+        return None
+    
+    # Common test dates
+    all_dates = set()
+    for ticker in all_data:
+        all_dates.update(all_data[ticker]['probabilities'].index)
+    common_dates = sorted(all_dates)
+    
+    print(f"\nTest period: {common_dates[0].date()} to {common_dates[-1].date()} ({len(common_dates)} days)")
+    print(f"Stocks with data: {len(all_data)}")
+    
+    """ FOUR strategies to compare:
+        
+        1. Model: Top N stocks by confidence, rebalance, with costs
+        2. Equal-Weight: Hold ALL stocks equally, rebalance, with costs (FAIR benchmark)
+        3. S&P 500: Buy and hold (no costs)
+        4. Random: Pick N stocks randomly, rebalance, with costs
     """
-    model_total = (results['Model_Cumulative'].iloc[-1] - 1) * 100
-    sp500_total = (results['SP500_Cumulative'].iloc[-1] - 1) * 100
-    random_total = (results['Random_Cumulative'].iloc[-1] - 1) * 100
+    # Portfolios
+    model_value = initial_capital
+    ew_value = initial_capital      # Equal-weight benchmark
+    sp500_value = initial_capital
+    random_value = initial_capital
     
-    print(f"\n{'='*50}")
-    print(f"BACKTEST RESULTS ({len(results)} trading days)")
-    print(f"{'='*50}")
-    print(f"  Model Strategy:     {model_total:+.2f}%")
-    print(f"  S&P 500 Buy&Hold:   {sp500_total:+.2f}%")
-    print(f"  Random Strategy:    {random_total:+.2f}%")
-    print(f"{'='*50}")
+    model_history = []
+    ew_history = []
+    sp500_history = []
+    random_history = []
     
-    # Calculate how many days the model was invested vs cash
-    invested_days = (results['Prediction'] == 1).sum()
-    cash_days = (results['Prediction'] == 0).sum()
-    print(f"  Days Invested:      {invested_days} ({invested_days/len(results)*100:.1f}%)")
-    print(f"  Days in Cash:       {cash_days} ({cash_days/len(results)*100:.1f}%)")
+    # Track costs
+    model_total_costs = 0
+    ew_total_costs = 0
+    random_total_costs = 0
     
-    """ Plot the three strategies on the same chart.
-        This visually shows which strategy performed best over time.
+    # S&P 500
+    sp500_data = yf.download("^GSPC", period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
+    sp500_returns = sp500_data.pct_change().reindex(common_dates, method='ffill').fillna(0)
+    
+    # Holdings
+    model_holdings = {}
+    ew_holdings = {}
+    random_holdings = {}
+    rebalance_counter = 0
+    
+    # Calculate equal-weight returns (buy and hold all stocks)
+    all_returns = pd.DataFrame({t: all_data[t]['returns'] for t in all_data})
+    ew_daily_returns = all_returns.mean(axis=1).reindex(common_dates, fill_value=0)
+    
+    for i, date in enumerate(common_dates):
+        sp500_ret = sp500_returns.loc[date]
+        
+        """ Model portfolio: update value from holdings.
+        """
+        if model_holdings:
+            daily_ret = 0
+            valid = 0
+            for ticker in model_holdings:
+                if date in all_data[ticker]['returns'].index:
+                    r = all_data[ticker]['returns'].loc[date]
+                    if not np.isnan(r):
+                        daily_ret += r
+                        valid += 1
+            if valid > 0:
+                model_value *= (1 + daily_ret / valid)
+        
+        model_history.append(model_value)
+        
+        """ Equal-weight: always invested in all stocks.
+        """
+        ew_ret = ew_daily_returns.loc[date] if date in ew_daily_returns.index else 0
+        if not np.isnan(ew_ret):
+            ew_value *= (1 + ew_ret)
+        ew_history.append(ew_value)
+        
+        """ S&P 500: buy and hold.
+        """
+        sp500_value *= (1 + sp500_ret)
+        sp500_history.append(sp500_value)
+        
+        """ Random portfolio.
+        """
+        if random_holdings:
+            rand_ret = 0
+            rand_valid = 0
+            for ticker in random_holdings:
+                if date in all_data[ticker]['returns'].index:
+                    r = all_data[ticker]['returns'].loc[date]
+                    if not np.isnan(r):
+                        rand_ret += r
+                        rand_valid += 1
+            if rand_valid > 0:
+                random_value *= (1 + rand_ret / rand_valid)
+        random_history.append(random_value)
+        
+        """ REBALANCE every N days.
+            Compare old holdings to new, charge costs for changes.
+        """
+        rebalance_counter += 1
+        if rebalance_counter >= rebalance_days:
+            rebalance_counter = 0
+            
+            # Score all stocks
+            scores = {}
+            for ticker in all_data:
+                if date in all_data[ticker]['probabilities'].index:
+                    scores[ticker] = all_data[ticker]['probabilities'].loc[date]
+            
+            if scores:
+                ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+                new_top = set(ticker for ticker, _ in ranked[:top_n])
+                
+                # MODEL: Sell old, buy new — count trades
+                old_model = set(model_holdings.keys())
+                sells = old_model - new_top
+                buys = new_top - old_model
+                model_trades = len(sells) + len(buys)
+                model_cost = model_trades * tx_cost
+                model_value *= (1 - model_cost)
+                model_total_costs += model_cost * model_value
+                
+                # Also sell stocks predicted Down (not just top N)
+                for ticker in list(model_holdings.keys()):
+                    if ticker in all_data and date in all_data[ticker]['predictions'].index:
+                        if all_data[ticker]['predictions'].loc[date] == 0:
+                            model_value *= (1 - tx_cost)  # Cost to sell
+                            model_total_costs += tx_cost * model_value
+                
+                model_holdings = {t: 1 for t in new_top}
+                
+                # EQUAL-WEIGHT: Rebalance to equal weight (costs apply)
+                available = [t for t in all_data if date in all_data[t]['returns'].index]
+                old_ew = set(ew_holdings.keys())
+                new_ew = set(available)
+                ew_trades = len(old_ew.symmetric_difference(new_ew))
+                ew_cost = ew_trades * tx_cost * 0.5  # Only rebalance drift
+                ew_value *= (1 - ew_cost)
+                ew_total_costs += ew_cost * ew_value
+                ew_holdings = {t: 1 for t in available}
+                
+                # RANDOM: Pick random stocks
+                if available:
+                    n_rand = min(top_n, len(available))
+                    old_rand = set(random_holdings.keys())
+                    new_rand = set(np.random.choice(available, n_rand, replace=False))
+                    rand_trades = len(old_rand.symmetric_difference(new_rand))
+                    rand_cost = rand_trades * tx_cost
+                    random_value *= (1 - rand_cost)
+                    random_total_costs += rand_cost * random_value
+                    random_holdings = {t: 1 for t in new_rand}
+                
+                if i % (rebalance_days * 10) == 0:
+                    print(f"  {date.date()}: Rebalanced | Model trades: {model_trades} | Top: {[t for t,_ in ranked[:3]]}")
+    
+    """ Final results.
     """
-    fig, ax = plt.subplots(figsize=(12, 6))
+    model_return = (model_value / initial_capital - 1) * 100
+    ew_return = (ew_value / initial_capital - 1) * 100
+    sp500_return = (sp500_value / initial_capital - 1) * 100
+    random_return = (random_value / initial_capital - 1) * 100
     
-    ax.plot(results.index, results['Model_Cumulative'], label='Model Strategy', linewidth=2)
-    ax.plot(results.index, results['SP500_Cumulative'], label='S&P 500 Buy & Hold', linewidth=2, linestyle='--')
-    ax.plot(results.index, results['Random_Cumulative'], label='Random Strategy', linewidth=1, alpha=0.7, linestyle=':')
+    print(f"\n{'='*60}")
+    print(f"RESULTS (test set only, with transaction costs)")
+    print(f"{'='*60}")
+    print(f"  {'Strategy':<25} {'Final Value':>12} {'Return':>10} {'Costs Paid':>12}")
+    print(f"  {'-'*59}")
+    print(f"  {'Model (Top N)':<25} ${model_value:>10,.0f} {model_return:>+9.1f}% ${model_total_costs:>10,.0f}")
+    print(f"  {'Equal-Weight (All)':<25} ${ew_value:>10,.0f} {ew_return:>+9.1f}% ${ew_total_costs:>10,.0f}")
+    print(f"  {'S&P 500':<25} ${sp500_value:>10,.0f} {sp500_return:>+9.1f}% ${'0':>10}")
+    print(f"  {'Random (Top N)':<25} ${random_value:>10,.0f} {random_return:>+9.1f}% ${random_total_costs:>10,.0f}")
+    print(f"  {'='*60}")
     
-    ax.set_title(f'Backtest: Model vs S&P 500 vs Random ({ticker})')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Growth of $1')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Did the model beat equal-weight?
+    alpha = model_return - ew_return
+    print(f"\n  Model vs Equal-Weight (TRUE alpha): {alpha:+.1f}%")
+    if alpha > 0:
+        print(f"  Model ADDS value over passive holding!")
+    else:
+        print(f"  Model does NOT beat just buying everything equally.")
+    
+    """ Plot.
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    ax1.plot(common_dates, model_history, label=f'Model ({model_return:+.1f}%)', linewidth=2.5)
+    ax1.plot(common_dates, ew_history, label=f'Equal-Weight ({ew_return:+.1f}%)', linewidth=2, linestyle='-.')
+    ax1.plot(common_dates, sp500_history, label=f'S&P 500 ({sp500_return:+.1f}%)', linewidth=2, linestyle='--')
+    ax1.plot(common_dates, random_history, label=f'Random ({random_return:+.1f}%)', linewidth=1.5, alpha=0.7, linestyle=':')
+    
+    ax1.set_title(f'Realistic Backtest: Transaction Costs + Mixed Universe\n({len(all_data)} stocks, Top {top_n}, rebalance every {rebalance_days}d, {tx_cost*100:.1f}% cost/trade)', fontsize=12)
+    ax1.set_ylabel('Portfolio Value ($)')
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+    
+    # Alpha over time (Model vs Equal-Weight)
+    alpha_over_time = [(m/ew - 1) * 100 for m, ew in zip(model_history, ew_history)]
+    ax2.fill_between(common_dates, alpha_over_time, 0, alpha=0.3, color='green')
+    ax2.plot(common_dates, alpha_over_time, label='Alpha vs Equal-Weight', linewidth=2, color='green')
+    ax2.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax2.set_title(f'True Alpha (Model minus Equal-Weight Benchmark)')
+    ax2.set_ylabel('Alpha (%)')
+    ax2.set_xlabel('Date')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('backtest_results.png', dpi=150)
+    plt.savefig('realistic_backtest.png', dpi=150)
     plt.show()
     
-    print(f"\nChart saved as 'backtest_results.png'")
+    print(f"\nChart saved as 'realistic_backtest.png'")
     
-    return results
+    return {
+        'model_return': model_return,
+        'ew_return': ew_return,
+        'sp500_return': sp500_return,
+        'random_return': random_return,
+        'alpha': alpha,
+        'total_costs': model_total_costs
+    }
 
 def main():
-    print("Starting Stock Predictor Pipeline...")
-    print(f"Ticker: {CONFIG['ticker']} | Target: {CONFIG['target_days']} days | Data: {CONFIG['data_years']} years")
+    print("Starting Portfolio Manager Bot...")
+    print(f"Universe: {len(CONFIG['universe'])} stocks | Target: {CONFIG['target_days']}d | Rebalance: {CONFIG['rebalance_days']}d")
     
-    dataset, target_col = prepare_data()
-    
-    check_class_balance(dataset, target_col)
-    
-    print(f"\nDataset shape: {dataset.shape[0]} rows, {dataset.shape[1]} columns")
-    print(f"Features: {list(dataset.columns)}")
-    
-    # Remove raw price columns and noisy features
-    filtered_dataset, kept_features = select_features(dataset, target_col)
-    
-    # Find the best hyperparameters on filtered data
-    best_model = tune_hyperparameters(filtered_dataset, target_col, n_splits=CONFIG['n_splits_cv'])
-    
-    # Train the final model with the best parameters found by tuning
-    print("\nTraining final model with best parameters...")
-    trained_model = train_baseline_model(filtered_dataset, target_col, model=best_model, n_splits=CONFIG['n_splits_cv'])
-    
-    # Run backtest to compare model vs S&P 500 vs Random
-    backtest_results = backtest(best_model, filtered_dataset, target_col)
+    # Run autonomous portfolio manager backtest
+    results = backtest()
     
     print("\nPipeline execution finished successfully!")
 
