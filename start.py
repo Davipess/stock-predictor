@@ -34,7 +34,7 @@ CONFIG = {
         'ZM', 'PTON', 'RBLX', 'NIO', 'LCID', 'RIVN',
     ],
     'target_days': 10,           # Days ahead to predict
-    'data_years': 10,            # Years of history to fetch
+    'data_years': 26,            # Years of history to fetch (back to 2000)
     'n_splits_cv': 5,           # Folds for cross-validation
     'feature_threshold': 0.02,  # Min importance to keep a feature
     'n_iter_tuning': 100,        # Hyperparameter combinations to test
