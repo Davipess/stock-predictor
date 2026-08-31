@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+backtest_results.png
+backtest_multistock.png
+portfolio_manager.png
+realistic_backtest.png
+*.pkl
+*.h5
+
+# API Keys (NEVER commit these)
+.env
+secrets.py
+credentials.json

@@ -2,14 +2,23 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+import os
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
 from scipy.stats import randint, uniform
 
+# Load environment variables (.env file)
+# Look for .env in the same directory as this script
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_script_dir, '.env'))
+
 CONFIG = {
-    # MIXED universe: winners, losers, and average performers
+    # Mixed universe: winners, losers, and average performers
     # This avoids survivorship bias
     'universe': [
         # WINNERS (large cap tech/growth)
@@ -21,7 +30,7 @@ CONFIG = {
         # SMALL/MID CAP (more volatile, harder to predict)
         'RIVN', 'PLTR', 'SOFI', 'ROKU', 'SNAP', 'PYPL', 'SQ',
         'DKNG', 'HOOD', 'RBLX', 'COIN', 'ABNB', 'UBER',
-        'ZM', 'PTON', 'BYND', 'NIO', 'LCID', 'RIVN',
+        'ZM', 'PTON', 'RBLX', 'NIO', 'LCID', 'RIVN',
     ],
     'target_days': 10,           # Days ahead to predict
     'data_years': 10,            # Years of history to fetch
@@ -33,11 +42,170 @@ CONFIG = {
     'rebalance_days': 10,       # Rebalance every N trading days
     'initial_capital': 10000,   # Starting capital in $
     'transaction_cost': 0.001,  # 0.1% cost per trade (buy or sell)
+    'retrain_years': 5,         # Years of data used for retraining
     'random_ticker_columns': [  # Raw price columns to remove
         'Close', 'High', 'Low', 'Open',
         'SMA_20', 'SMA_50'
     ],
+    # News Sentiment (Phase 2)
+    'use_news_sentiment': True,   # Enable/disable news features
+    'news_lookback_days': 30,     # Days of news to fetch per request
+    'sentiment_window': 5,        # Rolling window for sentiment features
 }
+
+# ============================================
+# NEWS SENTIMENT MODULE (Phase 2)
+# ============================================
+
+# Global variables for FinBERT model (loaded once)
+_finbert_model = None
+_finbert_tokenizer = None
+
+def load_finbert():
+    """Load FinBERT model and tokenizer (lazy loading - only when needed)."""
+    global _finbert_model, _finbert_tokenizer
+    
+    if _finbert_model is None:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        import torch
+        
+        print("Loading FinBERT model...")
+        model_name = "ProsusAI/finbert"
+        _finbert_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        _finbert_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        print("FinBERT loaded successfully.")
+    
+    return _finbert_model, _finbert_tokenizer
+
+def analyze_sentiment(text):
+    """Analyze sentiment of a single text using FinBERT.
+    Returns: 'positive', 'negative', or 'neutral'
+    """
+    import torch
+    
+    model, tokenizer = load_finbert()
+    labels = ["positive", "negative", "neutral"]
+    
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1).numpy()[0]
+    return labels[probs.argmax()]
+
+def fetch_news_finnhub(ticker, days=None):
+    """Fetch news articles from Finnhub for a given ticker.
+    Returns list of dicts with: headline, summary, datetime, source
+    """
+    import finnhub
+    
+    if days is None:
+        days = CONFIG['news_lookback_days']
+    
+    api_key = os.getenv('FINNHUB_API_KEY')
+    if not api_key:
+        print(f"  WARNING: No FINNHUB_API_KEY found in .env. Skipping news for {ticker}.")
+        return []
+    
+    client = finnhub.Client(api_key=api_key)
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    
+    try:
+        news = client.company_news(
+            ticker,
+            _from=start_date.strftime('%Y-%m-%d'),
+            to=end_date.strftime('%Y-%m-%d')
+        )
+        
+        # Process and clean news
+        processed = []
+        for article in news:
+            if article.get('headline') and article.get('datetime'):
+                processed.append({
+                    'headline': article['headline'],
+                    'summary': article.get('summary', ''),
+                    'datetime': datetime.fromtimestamp(article['datetime']),
+                    'source': article.get('source', 'Unknown')
+                })
+        
+        return processed
+        
+    except Exception as e:
+        print(f"  ERROR fetching news for {ticker}: {e}")
+        return []
+
+def get_daily_sentiment(ticker, stock_dates):
+    """Get daily sentiment features for a stock.
+    
+    For each trading day, calculates:
+    - News_Sentiment: average sentiment of news that day (+1=pos, -1=neg, 0=neutral)
+    - News_Volume: number of news articles that day
+    - News_Positive_Ratio: % of positive articles that day
+    
+    Args:
+        ticker: stock ticker
+        stock_dates: DatetimeIndex of trading dates to align with
+    
+    Returns:
+        DataFrame with sentiment features indexed by date
+    """
+    # Fetch news
+    news_articles = fetch_news_finnhub(ticker)
+    
+    if not news_articles:
+        # No news available - return zeros with all expected columns
+        return pd.DataFrame({
+            'News_Sentiment': 0.0,
+            'News_Volume': 0,
+            'News_Positive_Ratio': 0.0,
+            'Sentiment_MA': 0.0,
+            'Sentiment_Std': 0.0
+        }, index=stock_dates)
+    
+    # Analyze sentiment for each article
+    print(f"  Analyzing sentiment for {len(news_articles)} articles...")
+    for article in news_articles:
+        article['sentiment'] = analyze_sentiment(article['headline'])
+    
+    # Convert to DataFrame
+    news_df = pd.DataFrame(news_articles)
+    news_df['date'] = news_df['datetime'].dt.date
+    
+    # Aggregate by date
+    sentiment_map = {'positive': 1.0, 'negative': -1.0, 'neutral': 0.0}
+    
+    daily_sentiment = []
+    for date in stock_dates:
+        day_news = news_df[news_df['date'] == date.date()]
+        
+        if len(day_news) > 0:
+            sentiments = day_news['sentiment'].map(sentiment_map)
+            avg_sentiment = sentiments.mean()
+            news_count = len(day_news)
+            positive_ratio = (day_news['sentiment'] == 'positive').sum() / news_count
+        else:
+            avg_sentiment = 0.0
+            news_count = 0
+            positive_ratio = 0.0
+        
+        daily_sentiment.append({
+            'date': date,
+            'News_Sentiment': avg_sentiment,
+            'News_Volume': news_count,
+            'News_Positive_Ratio': positive_ratio
+        })
+    
+    result = pd.DataFrame(daily_sentiment).set_index('date')
+    
+    # Add rolling sentiment features
+    window = CONFIG['sentiment_window']
+    result['Sentiment_MA'] = result['News_Sentiment'].rolling(window, min_periods=1).mean()
+    result['Sentiment_Std'] = result['News_Sentiment'].rolling(window, min_periods=1).std().fillna(0)
+    
+    return result
 
 def prepare_data(ticker=None, target_days=None):
 
@@ -46,7 +214,7 @@ def prepare_data(ticker=None, target_days=None):
         This avoids the NaN problem where different tickers had different date formats.
     """
     if ticker is None:
-        ticker = CONFIG['tickers'][0]  # Default to first ticker
+        ticker = CONFIG['universe'][0]  # Default to first ticker
     if target_days is None:
         target_days = CONFIG['target_days']
     
@@ -75,6 +243,15 @@ def prepare_data(ticker=None, target_days=None):
     data['Ret_1d'] = data['Close'].pct_change(periods=1)
     data['Ret_5d'] = data['Close'].pct_change(periods=5)
     data['Ret_20d'] = data['Close'].pct_change(periods=20)
+
+    """ Data Quality Filter: Detect reverse splits or data errors.
+        A single-day move >50% is almost certainly a split, not a real market move.
+        These corrupt the model's ability to learn real patterns.
+    """
+    max_daily_move = data['Ret_1d'].abs().max()
+    if max_daily_move > 0.50:
+        print(f"  WARNING: {ticker} has a {max_daily_move*100:.0f}% single-day move (likely split). Skipping.")
+        return None, None
 
     # Add Trend & Momentum Indicators such as RSI SMA and MACD
     data.ta.sma(length=20, append=True) # 20-day Simple Moving Average (creates 'SMA_20')
@@ -108,7 +285,8 @@ def prepare_data(ticker=None, target_days=None):
     data['Stoch_D'] = stoch['STOCHd_14_3_3']
 
     # Calculate Distance to 52-week high (252 trading days)
-    rolling_52w_high = data['High'].rolling(window=252).max()
+    # min_periods=1 allows calculation even with less than 1 year of data
+    rolling_52w_high = data['High'].rolling(window=252, min_periods=1).max()
     data['Dist_52w_High_%'] = (data['Close'] - rolling_52w_high) / rolling_52w_high
 
     """ Volatility: How "unstable" the price is.
@@ -167,6 +345,28 @@ def prepare_data(ticker=None, target_days=None):
     """
     data['Price_vs_SMA20'] = (data['Close'] - data['SMA_20']) / data['SMA_20']
     data['Price_vs_SMA50'] = (data['Close'] - data['SMA_50']) / data['SMA_50']
+
+    """ 
+        Fetch news from Finnhub and analyze sentiment with FinBERT.
+        These features capture market sentiment that isn't in price data.
+    """
+    if CONFIG['use_news_sentiment']:
+        print(f"\nFetching news sentiment for {ticker}...")
+        sentiment_features = get_daily_sentiment(ticker, data.index)
+        
+        # Merge sentiment features with price data
+        data = data.join(sentiment_features, how='left')
+        
+        # Fill missing sentiment values using forward fill
+        # (no news for a day = same sentiment as last day with news)
+        # Then fill remaining NaN at the start with0 (neutral)
+        for col in ['News_Sentiment', 'News_Volume', 'News_Positive_Ratio',
+                     'Sentiment_MA', 'Sentiment_Std']:
+            data[col] = data[col].ffill().fillna(0)
+        
+        print(f"  Added5 sentiment features")
+    else:
+        print(f"\nNews sentiment disabled in CONFIG")
 
     print(f"DEBUG: Raw data rows: {len(data)}")
 
@@ -399,103 +599,93 @@ def select_features(dataset, target_col, threshold=None):
 
 def backtest():
     """
-        REALISTIC PORTFOLIO MANAGER BOT:
+        ADAPTIVE PORTFOLIO MANAGER BOT:
+        
+        Retrains the model every rebalance period using the most recent data.
+        This allows the model to adapt to changing market conditions.
         
         1. Mixed universe (winners + losers + small caps) — no survivorship bias
         2. Transaction costs on every trade (0.1% per buy/sell)
         3. Fair benchmarks: S&P 500 AND Equal-Weight portfolio of same stocks
-        4. Tracks total costs paid
-        
-        If the model can't beat a simple equal-weight portfolio of the same stocks
-        after costs, it has no real value.
+        4. Adaptive retraining every N days with sliding window
     """
     import numpy as np
+    from xgboost import XGBClassifier
     np.random.seed(42)
     
     universe = CONFIG['universe']
-    test_size = CONFIG['test_size']
     top_n = CONFIG['portfolio_top_n']
     rebalance_days = CONFIG['rebalance_days']
     initial_capital = CONFIG['initial_capital']
     tx_cost = CONFIG['transaction_cost']  # 0.1% per trade
+    retrain_years = CONFIG.get('retrain_years', 5)  # Years of data for retraining
     
     print(f"\n{'='*60}")
-    print(f"REALISTIC PORTFOLIO MANAGER BOT")
+    print(f"ADAPTIVE PORTFOLIO MANAGER BOT")
     print(f"Universe: {len(universe)} stocks | Top {top_n} | Rebalance: {rebalance_days}d")
     print(f"Transaction cost: {tx_cost*100:.1f}% per trade")
+    print(f"Retrain every {rebalance_days}d with last {retrain_years}y of data")
     print(f"{'='*60}")
     
-    """ Train models and get predictions + probabilities for all stocks.
+    """ Pre-fetch all stock data once to avoid repeated downloads.
     """
-    all_data = {}
-    
+    print(f"\nPre-fetching stock data...")
+    all_stock_data = {}
     for ticker in universe:
         try:
-            dataset, target_col = prepare_data(ticker=ticker)
-            
-            cols_to_remove = [c for c in CONFIG['random_ticker_columns'] if c in dataset.columns]
-            dataset = dataset.drop(columns=cols_to_remove, errors='ignore')
-            
-            split_idx = int(len(dataset) * (1 - test_size))
-            train_data = dataset.iloc[:split_idx]
-            test_data = dataset.iloc[split_idx:]
-            
-            X_train = train_data.drop(columns=[target_col])
-            y_train = train_data[target_col]
-            
-            from xgboost import XGBClassifier
-            n_down = (y_train == 0).sum()
-            n_up = (y_train == 1).sum()
-            model = XGBClassifier(
-                eval_metric='logloss', random_state=42,
-                scale_pos_weight=n_down/n_up if n_up > 0 else 1,
-                n_estimators=100, max_depth=4, learning_rate=0.05
-            )
-            model.fit(X_train, y_train)
-            
-            X_test = test_data.drop(columns=[target_col])
-            predictions = model.predict(X_test)
-            probabilities = model.predict_proba(X_test)[:, 1]
-            
-            stock_data = yf.download(ticker, period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
-            test_prices = stock_data.loc[test_data.index]
-            
-            all_data[ticker] = {
-                'predictions': pd.Series(predictions, index=test_data.index),
-                'probabilities': pd.Series(probabilities, index=test_data.index),
-                'prices': test_prices,
-                'returns': test_prices.pct_change()
-            }
-            
-            print(f"  {ticker}: OK")
-            
+            full_data, target_col = prepare_data(ticker=ticker)
+            if full_data is None:
+                print(f"  {ticker}: SKIPPED (bad data)")
+                continue
+            cols_to_remove = [c for c in CONFIG['random_ticker_columns'] if c in full_data.columns]
+            full_data = full_data.drop(columns=cols_to_remove, errors='ignore')
+            all_stock_data[ticker] = full_data
+            print(f"  {ticker}: {len(full_data)} rows")
         except Exception as e:
             print(f"  {ticker}: SKIPPED ({e})")
-            continue
     
-    if not all_data:
+    if not all_stock_data:
         print("ERROR: No stocks processed.")
         return None
     
-    # Common test dates
-    all_dates = set()
-    for ticker in all_data:
-        all_dates.update(all_data[ticker]['probabilities'].index)
-    common_dates = sorted(all_dates)
+    # Get price data for all stocks
+    print(f"\nFetching price data...")
+    price_data = {}
+    for ticker in all_stock_data:
+        try:
+            prices = yf.download(ticker, period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
+            price_data[ticker] = prices
+        except:
+            pass
     
-    print(f"\nTest period: {common_dates[0].date()} to {common_dates[-1].date()} ({len(common_dates)} days)")
-    print(f"Stocks with data: {len(all_data)}")
+    # S&P 500
+    sp500_data = yf.download("^GSPC", period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
     
-    """ FOUR strategies to compare:
-        
-        1. Model: Top N stocks by confidence, rebalance, with costs
-        2. Equal-Weight: Hold ALL stocks equally, rebalance, with costs (FAIR benchmark)
-        3. S&P 500: Buy and hold (no costs)
-        4. Random: Pick N stocks randomly, rebalance, with costs
+    # Find the test start date (80% of the earliest stock data)
+    min_len = min(len(d) for d in all_stock_data.values())
+    test_start_idx = int(min_len * 0.8)
+    first_ticker = list(all_stock_data.keys())[0]
+    test_dates = list(all_stock_data[first_ticker].index[test_start_idx:])
+    
+    print(f"\nTest period: {test_dates[0].date()} to {test_dates[-1].date()} ({len(test_dates)} days)")
+    print(f"Stocks with data: {len(all_stock_data)}")
+    
+    # Pre-compute all returns for each stock to avoid repeated calculations
+    print(f"\nPre-computing returns...")
+    stock_returns = {}
+    for ticker in all_stock_data:
+        if ticker in price_data:
+            prices = price_data[ticker]
+            returns = prices.pct_change()
+            stock_returns[ticker] = returns
+    
+    # Pre-compute S&P 500 returns
+    sp500_all_returns = sp500_data.pct_change()
+    
+    """ FOUR strategies to compare.
     """
-    # Portfolios
     model_value = initial_capital
-    ew_value = initial_capital      # Equal-weight benchmark
+    ew_value = initial_capital
     sp500_value = initial_capital
     random_value = initial_capital
     
@@ -504,27 +694,20 @@ def backtest():
     sp500_history = []
     random_history = []
     
-    # Track costs
     model_total_costs = 0
     ew_total_costs = 0
     random_total_costs = 0
     
-    # S&P 500
-    sp500_data = yf.download("^GSPC", period=f"{CONFIG['data_years']}y", progress=False)['Close'].squeeze()
-    sp500_returns = sp500_data.pct_change().reindex(common_dates, method='ffill').fillna(0)
-    
-    # Holdings
     model_holdings = {}
     ew_holdings = {}
     random_holdings = {}
     rebalance_counter = 0
+    models_trained = 0
     
-    # Calculate equal-weight returns (buy and hold all stocks)
-    all_returns = pd.DataFrame({t: all_data[t]['returns'] for t in all_data})
-    ew_daily_returns = all_returns.mean(axis=1).reindex(common_dates, fill_value=0)
+    sp500_returns = sp500_all_returns.reindex(test_dates, method='ffill').fillna(0)
     
-    for i, date in enumerate(common_dates):
-        sp500_ret = sp500_returns.loc[date]
+    for i, date in enumerate(test_dates):
+        sp500_ret = sp500_returns.loc[date] if date in sp500_returns.index else 0
         
         """ Model portfolio: update value from holdings.
         """
@@ -532,8 +715,8 @@ def backtest():
             daily_ret = 0
             valid = 0
             for ticker in model_holdings:
-                if date in all_data[ticker]['returns'].index:
-                    r = all_data[ticker]['returns'].loc[date]
+                if ticker in stock_returns and date in stock_returns[ticker].index:
+                    r = stock_returns[ticker].loc[date]
                     if not np.isnan(r):
                         daily_ret += r
                         valid += 1
@@ -544,9 +727,16 @@ def backtest():
         
         """ Equal-weight: always invested in all stocks.
         """
-        ew_ret = ew_daily_returns.loc[date] if date in ew_daily_returns.index else 0
-        if not np.isnan(ew_ret):
-            ew_value *= (1 + ew_ret)
+        ew_ret = 0
+        ew_valid = 0
+        for ticker in stock_returns:
+            if date in stock_returns[ticker].index:
+                r = stock_returns[ticker].loc[date]
+                if not np.isnan(r):
+                    ew_ret += r
+                    ew_valid += 1
+        if ew_valid > 0:
+            ew_value *= (1 + ew_ret / ew_valid)
         ew_history.append(ew_value)
         
         """ S&P 500: buy and hold.
@@ -560,8 +750,8 @@ def backtest():
             rand_ret = 0
             rand_valid = 0
             for ticker in random_holdings:
-                if date in all_data[ticker]['returns'].index:
-                    r = all_data[ticker]['returns'].loc[date]
+                if ticker in stock_returns and date in stock_returns[ticker].index:
+                    r = stock_returns[ticker].loc[date]
                     if not np.isnan(r):
                         rand_ret += r
                         rand_valid += 1
@@ -569,22 +759,73 @@ def backtest():
                 random_value *= (1 + rand_ret / rand_valid)
         random_history.append(random_value)
         
-        """ REBALANCE every N days.
-            Compare old holdings to new, charge costs for changes.
+        """ REBALANCE + RETRAIN every N days.
         """
         rebalance_counter += 1
         if rebalance_counter >= rebalance_days:
             rebalance_counter = 0
             
-            # Score all stocks
-            scores = {}
-            for ticker in all_data:
-                if date in all_data[ticker]['probabilities'].index:
-                    scores[ticker] = all_data[ticker]['probabilities'].loc[date]
+            """ ADAPTIVE RETRAINING: Train new models with recent data only.
+            """
+            current_scores = {}
+            for ticker in all_stock_data:
+                try:
+                    full_data = all_stock_data[ticker]
+                    
+                    date_idx = full_data.index.get_loc(date)
+                    start_idx = max(0, date_idx - retrain_years * 252)
+                    
+                    if date_idx < 100:
+                        continue
+                    
+                    window_data = full_data.iloc[start_idx:date_idx]
+                    
+                    if len(window_data) < 100:
+                        continue
+                    
+                    target_col_name = [c for c in window_data.columns if c.startswith('Target_')][0]
+                    X = window_data.drop(columns=[target_col_name])
+                    y = window_data[target_col_name]
+                    
+                    if y.nunique() < 2:
+                        continue
+                    
+                    n_down = (y == 0).sum()
+                    n_up = (y == 1).sum()
+                    model = XGBClassifier(
+                        eval_metric='logloss', random_state=42,
+                        scale_pos_weight=n_down/n_up if n_up > 0 else 1,
+                        n_estimators=50, max_depth=2, learning_rate=0.05,
+                        min_child_weight=30, gamma=0.5,
+                        subsample=0.6, colsample_bytree=0.5
+                    )
+                    model.fit(X, y)
+                    
+                    today_row = full_data.iloc[date_idx:date_idx + 1]
+                    today_row = today_row.drop(columns=[target_col_name], errors='ignore')
+                    if len(today_row) > 0 and list(today_row.columns) == list(X.columns):
+                        prob = model.predict_proba(today_row)[:, 1][0]
+                        current_scores[ticker] = prob
+                    
+                    models_trained += 1
+                except Exception as e:
+                    continue
             
-            if scores:
-                ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            if current_scores:
+                ranked = sorted(current_scores.items(), key=lambda x: x[1], reverse=True)
                 new_top = set(ticker for ticker, _ in ranked[:top_n])
+                
+                # DEBUG: Show what the model is picking
+                if models_trained % 30 == 0:
+                    print(f"\n  DEBUG - Date: {date.date()}")
+                    print(f"  Top picks: {[(t, f'{s:.3f}') for t, s in ranked[:5]]}")
+                    # Check returns of picked stocks over next 10 days
+                    next_10_dates = test_dates[i:i+10] if i+10 < len(test_dates) else test_dates[i:]
+                    for t, _ in ranked[:3]:
+                        if t in stock_returns:
+                            period_ret = sum(stock_returns[t].get(d, 0) for d in next_10_dates if d in stock_returns[t].index)
+                            print(f"    {t} next 10d return: {period_ret*100:+.1f}%")
+                    print(f"  Model value: ${model_value:,.0f}")
                 
                 # MODEL: Sell old, buy new — count trades
                 old_model = set(model_holdings.keys())
@@ -595,21 +836,14 @@ def backtest():
                 model_value *= (1 - model_cost)
                 model_total_costs += model_cost * model_value
                 
-                # Also sell stocks predicted Down (not just top N)
-                for ticker in list(model_holdings.keys()):
-                    if ticker in all_data and date in all_data[ticker]['predictions'].index:
-                        if all_data[ticker]['predictions'].loc[date] == 0:
-                            model_value *= (1 - tx_cost)  # Cost to sell
-                            model_total_costs += tx_cost * model_value
-                
                 model_holdings = {t: 1 for t in new_top}
                 
-                # EQUAL-WEIGHT: Rebalance to equal weight (costs apply)
-                available = [t for t in all_data if date in all_data[t]['returns'].index]
+                # EQUAL-WEIGHT: Rebalance (costs apply)
+                available = [t for t in all_stock_data if t in price_data and date in price_data[t].index]
                 old_ew = set(ew_holdings.keys())
                 new_ew = set(available)
                 ew_trades = len(old_ew.symmetric_difference(new_ew))
-                ew_cost = ew_trades * tx_cost * 0.5  # Only rebalance drift
+                ew_cost = ew_trades * tx_cost * 0.5
                 ew_value *= (1 - ew_cost)
                 ew_total_costs += ew_cost * ew_value
                 ew_holdings = {t: 1 for t in available}
@@ -625,8 +859,9 @@ def backtest():
                     random_total_costs += rand_cost * random_value
                     random_holdings = {t: 1 for t in new_rand}
                 
-                if i % (rebalance_days * 10) == 0:
-                    print(f"  {date.date()}: Rebalanced | Model trades: {model_trades} | Top: {[t for t,_ in ranked[:3]]}")
+                if i % (rebalance_days * 5) == 0:
+                    top3 = [t for t, _ in ranked[:3]]
+                    print(f"  {date.date()}: Retrained {models_trained} models | Top: {top3}")
     
     """ Final results.
     """
@@ -646,7 +881,6 @@ def backtest():
     print(f"  {'Random (Top N)':<25} ${random_value:>10,.0f} {random_return:>+9.1f}% ${random_total_costs:>10,.0f}")
     print(f"  {'='*60}")
     
-    # Did the model beat equal-weight?
     alpha = model_return - ew_return
     print(f"\n  Model vs Equal-Weight (TRUE alpha): {alpha:+.1f}%")
     if alpha > 0:
@@ -658,21 +892,20 @@ def backtest():
     """
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
-    ax1.plot(common_dates, model_history, label=f'Model ({model_return:+.1f}%)', linewidth=2.5)
-    ax1.plot(common_dates, ew_history, label=f'Equal-Weight ({ew_return:+.1f}%)', linewidth=2, linestyle='-.')
-    ax1.plot(common_dates, sp500_history, label=f'S&P 500 ({sp500_return:+.1f}%)', linewidth=2, linestyle='--')
-    ax1.plot(common_dates, random_history, label=f'Random ({random_return:+.1f}%)', linewidth=1.5, alpha=0.7, linestyle=':')
+    ax1.plot(test_dates, model_history, label=f'Model ({model_return:+.1f}%)', linewidth=2.5)
+    ax1.plot(test_dates, ew_history, label=f'Equal-Weight ({ew_return:+.1f}%)', linewidth=2, linestyle='-.')
+    ax1.plot(test_dates, sp500_history, label=f'S&P 500 ({sp500_return:+.1f}%)', linewidth=2, linestyle='--')
+    ax1.plot(test_dates, random_history, label=f'Random ({random_return:+.1f}%)', linewidth=1.5, alpha=0.7, linestyle=':')
     
-    ax1.set_title(f'Realistic Backtest: Transaction Costs + Mixed Universe\n({len(all_data)} stocks, Top {top_n}, rebalance every {rebalance_days}d, {tx_cost*100:.1f}% cost/trade)', fontsize=12)
+    ax1.set_title(f'Adaptive Backtest: Retrains every {rebalance_days}d ({retrain_years}y window)\n({len(all_stock_data)} stocks, Top {top_n}, {tx_cost*100:.1f}% cost/trade)', fontsize=12)
     ax1.set_ylabel('Portfolio Value ($)')
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
     
-    # Alpha over time (Model vs Equal-Weight)
     alpha_over_time = [(m/ew - 1) * 100 for m, ew in zip(model_history, ew_history)]
-    ax2.fill_between(common_dates, alpha_over_time, 0, alpha=0.3, color='green')
-    ax2.plot(common_dates, alpha_over_time, label='Alpha vs Equal-Weight', linewidth=2, color='green')
+    ax2.fill_between(test_dates, alpha_over_time, 0, alpha=0.3, color='green')
+    ax2.plot(test_dates, alpha_over_time, label='Alpha vs Equal-Weight', linewidth=2, color='green')
     ax2.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
     ax2.set_title(f'True Alpha (Model minus Equal-Weight Benchmark)')
     ax2.set_ylabel('Alpha (%)')
