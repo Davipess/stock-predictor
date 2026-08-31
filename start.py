@@ -57,6 +57,10 @@ CONFIG = {
     'lstm_seq_length': 20,        # Days of history for LSTM sequences
     'lstm_epochs': 30,            # Training epochs for LSTM
     'lstm_hidden': 32,            # LSTM hidden units
+    
+    # PCA Dimensionality Reduction
+    'use_pca': False,             # PCA hurts performance — loses useful feature info
+    'pca_variance': 0.95,         # Keep 95% of variance
 }
 
 # ============================================
@@ -240,6 +244,9 @@ def prepare_data(ticker=None, target_days=None):
     data['Volume'] = raw_data['Volume'][ticker]
     data['SP500_Close'] = raw_data['Close']['^GSPC']
     data['VIX'] = raw_data['Close']['^VIX']
+
+    # Fill any NaN from multi-ticker alignment (required for KAMA/HWMA indicators)
+    data = data.ffill().bfill()
 
     """ Calculate Returns 
         Essentially we look at how much a specific stock raised or declined in a percentage.
@@ -877,6 +884,7 @@ def backtest():
             
             import torch
             from sklearn.preprocessing import StandardScaler
+            from sklearn.decomposition import PCA
             
             for ticker in all_stock_data:
                 try:
@@ -900,6 +908,15 @@ def backtest():
                     if y.nunique() < 2:
                         continue
                     
+                    # === PCA (if enabled) ===
+                    use_pca = CONFIG.get('use_pca', False)
+                    pca = None
+                    if use_pca and X.shape[1] > 10:
+                        pca = PCA(n_components=CONFIG.get('pca_variance', 0.95))
+                        X = pd.DataFrame(pca.fit_transform(X), index=X.index)
+                        # Rename columns for XGBoost
+                        X.columns = [f'PC{i+1}' for i in range(X.shape[1])]
+                    
                     # === XGBoost ===
                     n_down = (y == 0).sum()
                     n_up = (y == 1).sum()
@@ -914,6 +931,12 @@ def backtest():
                     
                     today_row = full_data.iloc[date_idx:date_idx + 1]
                     today_row = today_row.drop(columns=[target_col_name], errors='ignore')
+                    
+                    # Apply PCA to today_row if PCA was used
+                    if pca is not None:
+                        today_row = pd.DataFrame(pca.transform(today_row), index=today_row.index)
+                        today_row.columns = [f'PC{i+1}' for i in range(today_row.shape[1])]
+                    
                     if len(today_row) > 0 and list(today_row.columns) == list(X.columns):
                         xgb_prob = xgb_model.predict_proba(today_row)[:, 1][0]
                         xgb_scores[ticker] = xgb_prob
