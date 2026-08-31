@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 from scipy.stats import randint, uniform
 from lstm_model import StockLSTM, create_sequences, train_lstm, predict_lstm
 
@@ -34,7 +35,7 @@ CONFIG = {
         'ZM', 'PTON', 'RBLX', 'NIO', 'LCID', 'RIVN',
     ],
     'target_days': 10,           # Days ahead to predict
-    'data_years': 26,            # Years of history to fetch (back to 2000)
+    'data_years': 10,            # Years of history to fetch
     'n_splits_cv': 5,           # Folds for cross-validation
     'feature_threshold': 0.02,  # Min importance to keep a feature
     'n_iter_tuning': 100,        # Hyperparameter combinations to test
@@ -44,6 +45,7 @@ CONFIG = {
     'initial_capital': 10000,   # Starting capital in $
     'transaction_cost': 0.001,  # 0.1% cost per trade (buy or sell)
     'retrain_years': 5,         # Years of data used for retraining
+    'model_type': 'lightgbm',   # 'xgboost' or 'lightgbm'
     'random_ticker_columns': [  # Raw price columns to remove (data leakage)
         'Close', 'High', 'Low', 'Open'
     ],
@@ -876,7 +878,7 @@ def backtest():
             """ ADAPTIVE RETRAINING: Train new models with recent data only.
                 Uses ensemble: XGBoost + LSTM (if enabled).
             """
-            xgb_scores = {}
+            model_scores = {}
             lstm_scores = {}
             use_lstm = CONFIG.get('use_lstm', False)
             lstm_weight = CONFIG.get('lstm_weight', 0.2)
@@ -917,17 +919,27 @@ def backtest():
                         # Rename columns for XGBoost
                         X.columns = [f'PC{i+1}' for i in range(X.shape[1])]
                     
-                    # === XGBoost ===
+                    # === Model (XGBoost or LightGBM) ===
                     n_down = (y == 0).sum()
                     n_up = (y == 1).sum()
-                    xgb_model = XGBClassifier(
-                        eval_metric='logloss', random_state=42,
-                        scale_pos_weight=n_down/n_up if n_up > 0 else 1,
-                        n_estimators=50, max_depth=2, learning_rate=0.05,
-                        min_child_weight=30, gamma=0.5,
-                        subsample=0.6, colsample_bytree=0.5
-                    )
-                    xgb_model.fit(X, y)
+                    model_type = CONFIG.get('model_type', 'xgboost')
+                    
+                    if model_type == 'lightgbm':
+                        model = LGBMClassifier(
+                            random_state=42, verbose=-1,
+                            is_unbalance=True,
+                            n_estimators=50, max_depth=2, learning_rate=0.05,
+                            min_child_weight=30, subsample=0.6, colsample_bytree=0.5
+                        )
+                    else:
+                        model = XGBClassifier(
+                            eval_metric='logloss', random_state=42,
+                            scale_pos_weight=n_down/n_up if n_up > 0 else 1,
+                            n_estimators=50, max_depth=2, learning_rate=0.05,
+                            min_child_weight=30, gamma=0.5,
+                            subsample=0.6, colsample_bytree=0.5
+                        )
+                    model.fit(X, y)
                     
                     today_row = full_data.iloc[date_idx:date_idx + 1]
                     today_row = today_row.drop(columns=[target_col_name], errors='ignore')
@@ -938,8 +950,7 @@ def backtest():
                         today_row.columns = [f'PC{i+1}' for i in range(today_row.shape[1])]
                     
                     if len(today_row) > 0 and list(today_row.columns) == list(X.columns):
-                        xgb_prob = xgb_model.predict_proba(today_row)[:, 1][0]
-                        xgb_scores[ticker] = xgb_prob
+                        model_scores[ticker] = model.predict_proba(today_row)[:, 1][0]
                     
                     # === LSTM (if enabled) ===
                     if use_lstm and len(window_data) >= seq_length + 50:
@@ -994,11 +1005,11 @@ def backtest():
             # === COMBINE SCORES (Ensemble) ===
             # LSTM only for top 10 XGBoost candidates (not all stocks — too slow)
             current_scores = {}
-            xgb_ranked = sorted(xgb_scores.items(), key=lambda x: x[1], reverse=True)
+            xgb_ranked = sorted(            model_scores.items(), key=lambda x: x[1], reverse=True)
             top_candidates = [t for t, _ in xgb_ranked[:10]]
             
             for ticker in top_candidates:
-                xgb_p = xgb_scores[ticker]
+                xgb_p =             model_scores[ticker]
                 if use_lstm and ticker in lstm_scores:
                     lstm_p = lstm_scores[ticker]
                     current_scores[ticker] = (1 - lstm_weight) * xgb_p + lstm_weight * lstm_p
@@ -1006,9 +1017,9 @@ def backtest():
                     current_scores[ticker] = xgb_p
             
             # Add remaining stocks with XGBoost only
-            for ticker in xgb_scores:
+            for ticker in             model_scores:
                 if ticker not in current_scores:
-                    current_scores[ticker] = xgb_scores[ticker]
+                    current_scores[ticker] =             model_scores[ticker]
             
             if current_scores:
                 ranked = sorted(current_scores.items(), key=lambda x: x[1], reverse=True)
