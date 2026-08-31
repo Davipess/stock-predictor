@@ -11,6 +11,7 @@ from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
 from scipy.stats import randint, uniform
+from lstm_model import StockLSTM, create_sequences, train_lstm, predict_lstm
 
 # Load environment variables (.env file)
 # Look for .env in the same directory as this script
@@ -50,6 +51,12 @@ CONFIG = {
     'use_news_sentiment': True,   # Enable/disable news features
     'news_lookback_days': 30,     # Days of news to fetch per request
     'sentiment_window': 5,        # Rolling window for sentiment features
+    # LSTM Ensemble (Phase 3)
+    'use_lstm': False,            # LSTM experimental (too slow for full backtest)
+    'lstm_weight': 0.2,           # Weight for LSTM (1 - weight = XGBoost weight)
+    'lstm_seq_length': 20,        # Days of history for LSTM sequences
+    'lstm_epochs': 30,            # Training epochs for LSTM
+    'lstm_hidden': 32,            # LSTM hidden units
 }
 
 # ============================================
@@ -717,6 +724,8 @@ def backtest():
     print(f"Universe: {len(universe)} stocks | Top {top_n} | Rebalance: {rebalance_days}d")
     print(f"Transaction cost: {tx_cost*100:.1f}% per trade")
     print(f"Retrain every {rebalance_days}d with last {retrain_years}y of data")
+    if CONFIG.get('use_lstm', False):
+        print(f"LSTM Ensemble: weight={CONFIG['lstm_weight']:.0%}, seq={CONFIG['lstm_seq_length']}d, hidden={CONFIG['lstm_hidden']}")
     print(f"{'='*60}")
     
     """ Pre-fetch all stock data once to avoid repeated downloads.
@@ -858,8 +867,17 @@ def backtest():
             rebalance_counter = 0
             
             """ ADAPTIVE RETRAINING: Train new models with recent data only.
+                Uses ensemble: XGBoost + LSTM (if enabled).
             """
-            current_scores = {}
+            xgb_scores = {}
+            lstm_scores = {}
+            use_lstm = CONFIG.get('use_lstm', False)
+            lstm_weight = CONFIG.get('lstm_weight', 0.2)
+            seq_length = CONFIG.get('lstm_seq_length', 20)
+            
+            import torch
+            from sklearn.preprocessing import StandardScaler
+            
             for ticker in all_stock_data:
                 try:
                     full_data = all_stock_data[ticker]
@@ -882,26 +900,92 @@ def backtest():
                     if y.nunique() < 2:
                         continue
                     
+                    # === XGBoost ===
                     n_down = (y == 0).sum()
                     n_up = (y == 1).sum()
-                    model = XGBClassifier(
+                    xgb_model = XGBClassifier(
                         eval_metric='logloss', random_state=42,
                         scale_pos_weight=n_down/n_up if n_up > 0 else 1,
                         n_estimators=50, max_depth=2, learning_rate=0.05,
                         min_child_weight=30, gamma=0.5,
                         subsample=0.6, colsample_bytree=0.5
                     )
-                    model.fit(X, y)
+                    xgb_model.fit(X, y)
                     
                     today_row = full_data.iloc[date_idx:date_idx + 1]
                     today_row = today_row.drop(columns=[target_col_name], errors='ignore')
                     if len(today_row) > 0 and list(today_row.columns) == list(X.columns):
-                        prob = model.predict_proba(today_row)[:, 1][0]
-                        current_scores[ticker] = prob
+                        xgb_prob = xgb_model.predict_proba(today_row)[:, 1][0]
+                        xgb_scores[ticker] = xgb_prob
+                    
+                    # === LSTM (if enabled) ===
+                    if use_lstm and len(window_data) >= seq_length + 50:
+                        try:
+                            feature_cols = list(X.columns)
+                            X_raw = X.values
+                            y_raw = y.values
+                            
+                            scaler = StandardScaler()
+                            X_scaled = scaler.fit_transform(X_raw)
+                            X_scaled = np.nan_to_num(X_scaled, nan=0.0)
+                            
+                            X_seq, y_seq = create_sequences(X_scaled, y_raw, seq_length)
+                            
+                            if len(X_seq) >= 30:
+                                # Select top 10 features by variance for LSTM
+                                variances = np.var(X_scaled, axis=0)
+                                top_idx = np.argsort(variances)[-10:]
+                                X_seq_small = X_seq[:, :, top_idx]
+                                
+                                input_size = X_seq_small.shape[2]
+                                lstm_model = StockLSTM(
+                                    input_size=input_size,
+                                    hidden_size=CONFIG.get('lstm_hidden', 32),
+                                    num_layers=1,
+                                    dropout=0.3
+                                )
+                                lstm_model, _ = train_lstm(
+                                    lstm_model, X_seq_small, y_seq,
+                                    epochs=CONFIG.get('lstm_epochs', 50),
+                                    lr=0.001, batch_size=64
+                                )
+                                
+                                # Predict on today
+                                today_full = full_data.iloc[max(0, date_idx - seq_length + 1):date_idx + 1]
+                                today_features = today_full[feature_cols].values
+                                today_scaled = scaler.transform(today_features)
+                                today_scaled = np.nan_to_num(today_scaled, nan=0.0)
+                                today_small = today_scaled[:, top_idx]
+                                
+                                if len(today_small) == seq_length:
+                                    X_today = today_small.reshape(1, seq_length, -1)
+                                    lstm_prob = predict_lstm(lstm_model, X_today)[0]
+                                    lstm_scores[ticker] = lstm_prob
+                        except Exception:
+                            pass
                     
                     models_trained += 1
                 except Exception as e:
                     continue
+            
+            # === COMBINE SCORES (Ensemble) ===
+            # LSTM only for top 10 XGBoost candidates (not all stocks — too slow)
+            current_scores = {}
+            xgb_ranked = sorted(xgb_scores.items(), key=lambda x: x[1], reverse=True)
+            top_candidates = [t for t, _ in xgb_ranked[:10]]
+            
+            for ticker in top_candidates:
+                xgb_p = xgb_scores[ticker]
+                if use_lstm and ticker in lstm_scores:
+                    lstm_p = lstm_scores[ticker]
+                    current_scores[ticker] = (1 - lstm_weight) * xgb_p + lstm_weight * lstm_p
+                else:
+                    current_scores[ticker] = xgb_p
+            
+            # Add remaining stocks with XGBoost only
+            for ticker in xgb_scores:
+                if ticker not in current_scores:
+                    current_scores[ticker] = xgb_scores[ticker]
             
             if current_scores:
                 ranked = sorted(current_scores.items(), key=lambda x: x[1], reverse=True)
