@@ -43,7 +43,8 @@ CONFIG = {
     'portfolio_top_n': 5,       # Buy top N stocks each rebalance
     'rebalance_days': 10,       # Rebalance every N trading days
     'initial_capital': 10000,   # Starting capital in $
-    'transaction_cost': 0.001,  # 0.1% cost per trade (buy or sell)
+    'transaction_cost': 0.003,  # 0.3% cost per trade (realistic: commission + spread)
+    'slippage': 0.0005,         # 0.05% slippage per trade (market impact)
     'retrain_years': 5,         # Years of data used for retraining
     'model_type': 'lightgbm',   # 'xgboost' or 'lightgbm'
     'random_ticker_columns': [  # Raw price columns to remove (data leakage)
@@ -106,14 +107,11 @@ def analyze_sentiment(text):
     probs = torch.nn.functional.softmax(outputs.logits, dim=-1).numpy()[0]
     return labels[probs.argmax()]
 
-def fetch_news_finnhub(ticker, days=None):
-    """Fetch news articles from Finnhub for a given ticker.
+def fetch_news_finnhub(ticker, start_date=None, end_date=None):
+    """Fetch news articles from Finnhub for a given ticker and date range.
     Returns list of dicts with: headline, summary, datetime, source
     """
     import finnhub
-    
-    if days is None:
-        days = CONFIG['news_lookback_days']
     
     api_key = os.getenv('FINNHUB_API_KEY')
     if not api_key:
@@ -122,8 +120,10 @@ def fetch_news_finnhub(ticker, days=None):
     
     client = finnhub.Client(api_key=api_key)
     
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    if end_date is None:
+        end_date = datetime.now()
+    if start_date is None:
+        start_date = end_date - timedelta(days=CONFIG['news_lookback_days'])
     
     try:
         news = client.company_news(
@@ -164,8 +164,27 @@ def get_daily_sentiment(ticker, stock_dates):
     Returns:
         DataFrame with sentiment features indexed by date
     """
-    # Fetch news
-    news_articles = fetch_news_finnhub(ticker)
+    # Fetch news for the ACTUAL date range (not just last 30 days)
+    start = stock_dates[0].to_pydatetime()
+    end = stock_dates[-1].to_pydatetime()
+    
+    # Fetch in yearly chunks to avoid API limits
+    all_articles = []
+    current = start
+    while current < end:
+        chunk_end = min(current + timedelta(days=365), end)
+        articles = fetch_news_finnhub(ticker, start_date=current, end_date=chunk_end)
+        all_articles.extend(articles)
+        current = chunk_end
+    
+    # Deduplicate by headline+datetime
+    seen = set()
+    news_articles = []
+    for a in all_articles:
+        key = (a['headline'], a['datetime'])
+        if key not in seen:
+            seen.add(key)
+            news_articles.append(a)
     
     if not news_articles:
         # No news available - return zeros with all expected columns
@@ -725,13 +744,13 @@ def backtest():
     top_n = CONFIG['portfolio_top_n']
     rebalance_days = CONFIG['rebalance_days']
     initial_capital = CONFIG['initial_capital']
-    tx_cost = CONFIG['transaction_cost']  # 0.1% per trade
+    tx_cost = CONFIG['transaction_cost'] + CONFIG.get('slippage', 0)  # Total cost per trade
     retrain_years = CONFIG.get('retrain_years', 5)  # Years of data for retraining
     
     print(f"\n{'='*60}")
     print(f"ADAPTIVE PORTFOLIO MANAGER BOT")
     print(f"Universe: {len(universe)} stocks | Top {top_n} | Rebalance: {rebalance_days}d")
-    print(f"Transaction cost: {tx_cost*100:.1f}% per trade")
+    print(f"Transaction cost: {tx_cost*100:.2f}% per trade (commission + slippage)")
     print(f"Retrain every {rebalance_days}d with last {retrain_years}y of data")
     if CONFIG.get('use_lstm', False):
         print(f"LSTM Ensemble: weight={CONFIG['lstm_weight']:.0%}, seq={CONFIG['lstm_seq_length']}d, hidden={CONFIG['lstm_hidden']}")
@@ -1107,7 +1126,7 @@ def backtest():
     ax1.plot(test_dates, sp500_history, label=f'S&P 500 ({sp500_return:+.1f}%)', linewidth=2, linestyle='--')
     ax1.plot(test_dates, random_history, label=f'Random ({random_return:+.1f}%)', linewidth=1.5, alpha=0.7, linestyle=':')
     
-    ax1.set_title(f'Adaptive Backtest: Retrains every {rebalance_days}d ({retrain_years}y window)\n({len(all_stock_data)} stocks, Top {top_n}, {tx_cost*100:.1f}% cost/trade)', fontsize=12)
+    ax1.set_title(f'Adaptive Backtest: Retrains every {rebalance_days}d ({retrain_years}y window)\n({len(all_stock_data)} stocks, Top {top_n}, {tx_cost*100:.2f}% cost/trade)', fontsize=12)
     ax1.set_ylabel('Portfolio Value ($)')
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
