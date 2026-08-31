@@ -43,9 +43,8 @@ CONFIG = {
     'initial_capital': 10000,   # Starting capital in $
     'transaction_cost': 0.001,  # 0.1% cost per trade (buy or sell)
     'retrain_years': 5,         # Years of data used for retraining
-    'random_ticker_columns': [  # Raw price columns to remove
-        'Close', 'High', 'Low', 'Open',
-        'SMA_20', 'SMA_50'
+    'random_ticker_columns': [  # Raw price columns to remove (data leakage)
+        'Close', 'High', 'Low', 'Open'
     ],
     # News Sentiment (Phase 2)
     'use_news_sentiment': True,   # Enable/disable news features
@@ -345,6 +344,99 @@ def prepare_data(ticker=None, target_days=None):
     """
     data['Price_vs_SMA20'] = (data['Close'] - data['SMA_20']) / data['SMA_20']
     data['Price_vs_SMA50'] = (data['Close'] - data['SMA_50']) / data['SMA_50']
+
+    """ ============================================
+        ADDITIONAL INDICATORS (from research paper)
+        Paper found these are top predictors for S&P 500.
+        ============================================
+
+        HLC3: Average of High, Low, Close — smoother price proxy.
+    """
+    data['HLC3'] = (data['High'] + data['Low'] + data['Close']) / 3
+
+    """ TEMA: Triple Exponential Moving Average — reacts faster than SMA/EMA.
+        Less lag = better at catching trend changes early.
+    """
+    data.ta.tema(length=20, append=True)  # Creates 'TEMA_20'
+
+    """ FWMA: Forecaster Weighted Moving Average — uses Fibonacci weights.
+        Recent prices get Fibonacci-weighted importance.
+    """
+    data.ta.fwma(length=20, append=True)  # Creates 'FWMA_20'
+
+    """ OBV: On-Balance Volume — accumulates volume on up days, subtracts on down.
+        Rising OBV with rising price = strong trend confirmation.
+        Divergence between OBV and price = potential reversal.
+    """
+    data.ta.obv(append=True)  # Creates 'OBV'
+
+    """ RVI: Relative Vigor Index — measures conviction of a move.
+        Uses Open/Close relationship to gauge bullish vs bearish energy.
+    """
+    data.ta.rvi(length=14, append=True)  # Creates 'RVI_14'
+
+    """ KAMA: Kaufman Adaptive Moving Average — adjusts to market noise.
+        Flat in sideways markets (avoids whipsaws), fast in trends.
+    """
+    data.ta.kama(length=10, append=True)  # Creates 'KAMA_10'
+
+    """ SWMA: Sine Weighted Moving Average — uses sine function for weights.
+        Middle of the window gets highest weight, smooths edges.
+    """
+    data.ta.swma(length=20, append=True)  # Creates 'SWMA_20'
+
+    """ MFI: Money Flow Index — RSI weighted by volume.
+        >80 = overbought with volume confirmation, <20 = oversold.
+        More reliable than RSI alone because it confirms with volume.
+    """
+    data.ta.mfi(length=14, append=True)  # Creates 'MFI_14'
+
+    """ PVT: Price Volume Trend — cumulative volume weighted by price change.
+        Similar to OBV but proportional to price change magnitude.
+    """
+    data.ta.pvt(append=True)  # Creates 'PVT'
+
+    """ EMA: Exponential Moving Average — exponential decay weighting.
+        More responsive than SMA, gives more weight to recent prices.
+    """
+    data.ta.ema(length=20, append=True)  # Creates 'EMA_20'
+    data.ta.ema(length=50, append=True)  # Creates 'EMA_50'
+
+    """ HMA: Hull Moving Average — near-zero lag with smooth curve.
+        Uses weighted moving average of WMA differences.
+    """
+    data.ta.hma(length=20, append=True)  # Creates 'HMA_20'
+
+    """ HWMA: Holt-Winter Moving Average — exponential smoothing with trend.
+        Captures both level and trend components of price.
+    """
+    data.ta.hwma(length=20, append=True)  # Creates 'HWMA_20'
+
+    """ Ichimoku Cloud — Japanese trend system.
+        Tenkan/Kijun cross = signal, Cloud = support/resistance zone.
+    """
+    nine_high = data['High'].rolling(window=9).max()
+    nine_low = data['Low'].rolling(window=9).min()
+    data['Ichimoku_Tenkan'] = (nine_high + nine_low) / 2
+
+    twenty_six_high = data['High'].rolling(window=26).max()
+    twenty_six_low = data['Low'].rolling(window=26).min()
+    data['Ichimoku_Kijun'] = (twenty_six_high + twenty_six_low) / 2
+
+    data['Ichimoku_SpanA'] = ((data['Ichimoku_Tenkan'] + data['Ichimoku_Kijun']) / 2).shift(26)
+    fifty_two_high = data['High'].rolling(window=52).max()
+    fifty_two_low = data['Low'].rolling(window=52).min()
+    data['Ichimoku_SpanB'] = ((fifty_two_high + fifty_two_low) / 2).shift(26)
+    data['Ichimoku_Cloud_Width'] = (data['Ichimoku_SpanA'] - data['Ichimoku_SpanB']) / data['Close']
+
+    """ EMA crossover signals: EMA_20 vs EMA_50.
+        Golden cross (EMA20 > EMA50) = bullish, Death cross = bearish.
+    """
+    data['EMA_Cross'] = data['EMA_20'] - data['EMA_50']
+
+    """ Price relative to KAMA: Is price above/below adaptive average?
+    """
+    data['Price_vs_KAMA'] = (data['Close'] - data['KAMA_10_2_30']) / data['KAMA_10_2_30']
 
     """ 
         Fetch news from Finnhub and analyze sentiment with FinBERT.
