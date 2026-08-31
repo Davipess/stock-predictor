@@ -9,7 +9,6 @@ An end-to-end machine learning pipeline that predicts stock direction using 30+ 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
 [![XGBoost](https://img.shields.io/badge/XGBoost-1.7+-EE2E24?style=flat)](https://xgboost.readthedocs.io/)
 [![FinBERT](https://img.shields.io/badge/FinBERT-ProsusAI-yellow?style=flat)](https://huggingface.co/ProsusAI/finbert)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ![Backtest Results](realistic_backtest.png)
 
@@ -417,27 +416,45 @@ stock-predictor/
 
 ## Development Journey
 
-### Phase 1: Technical Baseline (Commits 1-8)
+### Commits 1-4: Solo Development (Davipess)
 
-**How it started:**
-The project began as a learning exercise — understanding how stock prediction works behind the scenes using Python, yfinance, and basic ML.
+The first 4 commits were written entirely by hand as a learning exercise to understand ML, technical analysis, and Python development:
 
-**What was built:**
-- Initial data pipeline with yfinance
+```
+2d0701f Initial commit
+568c0f7 First test with yfinance data extraction
+3ba7aac Refactored data extraction into a dynamic function
+f096f70 Imported and developed sequence for training of the XGBClassifier
+```
+
+**What was built from scratch:**
+- Data pipeline with yfinance for stock data extraction
 - XGBoost classifier for stock direction prediction
-- Technical indicators: SMA, RSI, MACD, Bollinger Bands, ATR, Stochastic
+- Basic technical indicators (SMA, RSI, MACD)
+- Train/test splitting logic
+- Initial model evaluation
+
+### Commits 5-15: AI-Assisted Development (with opencode)
+
+From commit 5 onward, the project was developed collaboratively with AI assistance using opencode (Claude). The AI handled code generation, debugging, research integration, and architectural decisions, while the project direction, requirements, and validation were driven by the author.
+
+#### Phase 1: Technical Baseline (Commits 5-8)
+
+**What was added:**
+- Enhanced pipeline: 5-year data, S&P 500/VIX context, class balance check
+- Bollinger Bands, ATR, Stochastic Oscillator indicators
+- Feature interactions (RSI x Volume, MACD x Volume)
 - Feature importance ranking and selection
+- CONFIG dictionary for centralized parameter management
 - Hyperparameter tuning with RandomizedSearchCV
 - Time-series cross-validation (never random splits!)
-- Initial backtesting with S&P 500 comparison
 
 **Key decisions:**
 - Used **classification** (up/down) instead of regression (exact price)
 - Implemented **TimeSeriesSplit** to prevent lookahead bias
 - Removed raw price columns to prevent the model from memorizing price levels
-- Added S&P 500 and VIX as market context features
 
-### Phase 2: Portfolio Manager & Sentiment (Commits 9-12)
+#### Phase 2: Portfolio Manager & Sentiment (Commits 9-12)
 
 **What was added:**
 - Adaptive backtester that retrains every 10 days on a 5-year sliding window
@@ -453,7 +470,7 @@ The project began as a learning exercise — understanding how stock prediction 
 - Removed SQ (delisted), filtered stocks with >50% single-day moves (reverse splits)
 - Fixed dotenv path resolution for different working directories
 
-### Phase 3: Overfitting Fix & Research Integration (Commits 13-15)
+#### Phase 3: Overfitting Fix & Research Integration (Commits 13-15)
 
 **The overfitting problem:**
 Initial XGBoost returned +55,713% — clearly unrealistic. Diagnostic testing revealed:
@@ -522,6 +539,10 @@ This project is for educational purposes. Stock predictions are not financial ad
 
 <div align="center">
 
+**Author:** [Davipess](https://github.com/Davipess)
+
 Built as a learning project to understand ML, technical analysis, and backtesting.
+
+Commits 1-4: Solo development | Commits 5+: AI-assisted with [opencode](https://opencode.ai)
 
 </div>
