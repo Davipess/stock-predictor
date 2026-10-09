@@ -32,7 +32,7 @@ CONFIG = {
         # SMALL/MID CAP (more volatile, harder to predict)
         'RIVN', 'PLTR', 'SOFI', 'ROKU', 'SNAP', 'PYPL', 'SQ',
         'DKNG', 'HOOD', 'RBLX', 'COIN', 'ABNB', 'UBER',
-        'ZM', 'PTON', 'RBLX', 'NIO', 'LCID', 'RIVN',
+        'ZM', 'PTON', 'NIO', 'LCID',
     ],
     'target_days': 10,           # Days ahead to predict
     'data_years': 10,            # Years of history to fetch
@@ -51,7 +51,7 @@ CONFIG = {
         'Close', 'High', 'Low', 'Open'
     ],
     # News Sentiment (Phase 2)
-    'use_news_sentiment': True,   # Enable/disable news features
+    'use_news_sentiment': False,  # False for fast backtests; True to fetch Finnhub/FinBERT
     'news_lookback_days': 30,     # Days of news to fetch per request
     'sentiment_window': 5,        # Rolling window for sentiment features
     # LSTM Ensemble (Phase 3)
@@ -62,7 +62,7 @@ CONFIG = {
     'lstm_hidden': 32,            # LSTM hidden units
     
     # PCA Dimensionality Reduction
-    'use_pca': False,             # PCA hurts performance — loses useful feature info
+    'use_pca': False,             # PCA hurts performance - loses useful feature info
     'pca_variance': 0.95,         # Keep 95% of variance
 }
 
@@ -385,69 +385,69 @@ def prepare_data(ticker=None, target_days=None):
         Paper found these are top predictors for S&P 500.
         ============================================
 
-        HLC3: Average of High, Low, Close — smoother price proxy.
+        HLC3: Average of High, Low, Close - smoother price proxy.
     """
     data['HLC3'] = (data['High'] + data['Low'] + data['Close']) / 3
 
-    """ TEMA: Triple Exponential Moving Average — reacts faster than SMA/EMA.
+    """ TEMA: Triple Exponential Moving Average - reacts faster than SMA/EMA.
         Less lag = better at catching trend changes early.
     """
     data.ta.tema(length=20, append=True)  # Creates 'TEMA_20'
 
-    """ FWMA: Forecaster Weighted Moving Average — uses Fibonacci weights.
+    """ FWMA: Forecaster Weighted Moving Average - uses Fibonacci weights.
         Recent prices get Fibonacci-weighted importance.
     """
     data.ta.fwma(length=20, append=True)  # Creates 'FWMA_20'
 
-    """ OBV: On-Balance Volume — accumulates volume on up days, subtracts on down.
+    """ OBV: On-Balance Volume - accumulates volume on up days, subtracts on down.
         Rising OBV with rising price = strong trend confirmation.
         Divergence between OBV and price = potential reversal.
     """
     data.ta.obv(append=True)  # Creates 'OBV'
 
-    """ RVI: Relative Vigor Index — measures conviction of a move.
+    """ RVI: Relative Vigor Index - measures conviction of a move.
         Uses Open/Close relationship to gauge bullish vs bearish energy.
     """
     data.ta.rvi(length=14, append=True)  # Creates 'RVI_14'
 
-    """ KAMA: Kaufman Adaptive Moving Average — adjusts to market noise.
+    """ KAMA: Kaufman Adaptive Moving Average - adjusts to market noise.
         Flat in sideways markets (avoids whipsaws), fast in trends.
     """
     data.ta.kama(length=10, append=True)  # Creates 'KAMA_10'
 
-    """ SWMA: Sine Weighted Moving Average — uses sine function for weights.
+    """ SWMA: Sine Weighted Moving Average - uses sine function for weights.
         Middle of the window gets highest weight, smooths edges.
     """
     data.ta.swma(length=20, append=True)  # Creates 'SWMA_20'
 
-    """ MFI: Money Flow Index — RSI weighted by volume.
+    """ MFI: Money Flow Index - RSI weighted by volume.
         >80 = overbought with volume confirmation, <20 = oversold.
         More reliable than RSI alone because it confirms with volume.
     """
     data.ta.mfi(length=14, append=True)  # Creates 'MFI_14'
 
-    """ PVT: Price Volume Trend — cumulative volume weighted by price change.
+    """ PVT: Price Volume Trend - cumulative volume weighted by price change.
         Similar to OBV but proportional to price change magnitude.
     """
     data.ta.pvt(append=True)  # Creates 'PVT'
 
-    """ EMA: Exponential Moving Average — exponential decay weighting.
+    """ EMA: Exponential Moving Average - exponential decay weighting.
         More responsive than SMA, gives more weight to recent prices.
     """
     data.ta.ema(length=20, append=True)  # Creates 'EMA_20'
     data.ta.ema(length=50, append=True)  # Creates 'EMA_50'
 
-    """ HMA: Hull Moving Average — near-zero lag with smooth curve.
+    """ HMA: Hull Moving Average - near-zero lag with smooth curve.
         Uses weighted moving average of WMA differences.
     """
     data.ta.hma(length=20, append=True)  # Creates 'HMA_20'
 
-    """ HWMA: Holt-Winter Moving Average — exponential smoothing with trend.
+    """ HWMA: Holt-Winter Moving Average - exponential smoothing with trend.
         Captures both level and trend components of price.
     """
     data.ta.hwma(length=20, append=True)  # Creates 'HWMA_20'
 
-    """ Ichimoku Cloud — Japanese trend system.
+    """ Ichimoku Cloud - Japanese trend system.
         Tenkan/Kijun cross = signal, Cloud = support/resistance zone.
     """
     nine_high = data['High'].rolling(window=9).max()
@@ -731,7 +731,7 @@ def backtest():
         Retrains the model every rebalance period using the most recent data.
         This allows the model to adapt to changing market conditions.
         
-        1. Mixed universe (winners + losers + small caps) — no survivorship bias
+        1. Mixed universe (winners + losers + small caps) - no survivorship bias
         2. Transaction costs on every trade (0.1% per buy/sell)
         3. Fair benchmarks: S&P 500 AND Equal-Weight portfolio of same stocks
         4. Adaptive retraining every N days with sliding window
@@ -1022,7 +1022,7 @@ def backtest():
                     continue
             
             # === COMBINE SCORES (Ensemble) ===
-            # LSTM only for top 10 XGBoost candidates (not all stocks — too slow)
+            # LSTM only for top 10 XGBoost candidates (not all stocks - too slow)
             current_scores = {}
             xgb_ranked = sorted(            model_scores.items(), key=lambda x: x[1], reverse=True)
             top_candidates = [t for t, _ in xgb_ranked[:10]]
@@ -1056,12 +1056,14 @@ def backtest():
                             print(f"    {t} next 10d return: {period_ret*100:+.1f}%")
                     print(f"  Model value: ${model_value:,.0f}")
                 
-                # MODEL: Sell old, buy new — count trades
+                # MODEL: Sell old, buy new - count trades
                 old_model = set(model_holdings.keys())
                 sells = old_model - new_top
                 buys = new_top - old_model
                 model_trades = len(sells) + len(buys)
-                model_cost = model_trades * tx_cost
+                # Turnover cost: each changed position trades 1/top_n of portfolio capital
+                trade_turnover = (model_trades / top_n) * 0.5 if top_n > 0 else 0
+                model_cost = trade_turnover * tx_cost
                 model_value *= (1 - model_cost)
                 model_total_costs += model_cost * model_value
                 
@@ -1083,7 +1085,8 @@ def backtest():
                     old_rand = set(random_holdings.keys())
                     new_rand = set(np.random.choice(available, n_rand, replace=False))
                     rand_trades = len(old_rand.symmetric_difference(new_rand))
-                    rand_cost = rand_trades * tx_cost
+                    rand_turnover = (rand_trades / top_n) * 0.5 if top_n > 0 else 0
+                    rand_cost = rand_turnover * tx_cost
                     random_value *= (1 - rand_cost)
                     random_total_costs += rand_cost * random_value
                     random_holdings = {t: 1 for t in new_rand}
@@ -1143,10 +1146,12 @@ def backtest():
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('realistic_backtest.png', dpi=150)
-    plt.show()
+    os.makedirs(os.path.join(_script_dir, 'assets'), exist_ok=True)
+    plt.savefig(os.path.join(_script_dir, 'assets', 'realistic_backtest.png'), dpi=150)
+    plt.savefig(os.path.join(_script_dir, 'realistic_backtest.png'), dpi=150)
+    plt.close(fig)
     
-    print(f"\nChart saved as 'realistic_backtest.png'")
+    print(f"\nChart saved as 'assets/realistic_backtest.png'")
     
     return {
         'model_return': model_return,

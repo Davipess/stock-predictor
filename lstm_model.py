@@ -2,8 +2,8 @@
 LSTM Model for Stock Direction Prediction.
 
 Architecture:
-- Input: (batch_size, seq_length, n_features) — sequence of past N days
-- LSTM layers → Fully connected → Sigmoid (probability of UP)
+- Input: (batch_size, seq_length, n_features): sequence of past N days
+- LSTM layers -> Fully connected -> Sigmoid (probability of UP)
 
 The model looks at a window of past days to predict if the stock
 will go UP or DOWN in the next 10 trading days.
@@ -55,7 +55,7 @@ class StockLSTM(nn.Module):
         Args:
             x: (batch_size, seq_length, input_size)
         Returns:
-            predictions: (batch_size, 1) — probability of UP
+            predictions: (batch_size, 1): probability of UP
         """
         # Initialize hidden state with zeros
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
@@ -153,7 +153,7 @@ def train_lstm(model, X_train, y_train, epochs=50, lr=0.001, batch_size=64):
         losses.append(avg_loss)
         
         if (epoch + 1) % 10 == 0:
-            print(f"    Epoch {epoch+1}/{epochs} — Loss: {avg_loss:.4f}")
+            print(f"    Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f}")
     
     return model, losses
 
@@ -200,7 +200,7 @@ def prepare_lstm_data(full_data, target_col, date_idx, retrain_years=5, seq_leng
     Returns:
         X_train:  (n_samples, seq_length, n_features)
         y_train:  (n_samples,)
-        X_today:  (1, seq_length, n_features) — for prediction
+        X_today:  (1, seq_length, n_features): for prediction
         scaler:   fitted StandardScaler
         feature_cols: list of feature column names
     """

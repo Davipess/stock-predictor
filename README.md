@@ -4,13 +4,16 @@
 
 **Adaptive ML Stock Selection with Technical Analysis & News Sentiment**
 
-An end-to-end machine learning pipeline that predicts stock direction using 30+ technical indicators, FinBERT news sentiment, and XGBoost classification — backtested against S&P 500 and equal-weight benchmarks with realistic transaction costs.
+An end-to-end machine learning pipeline that predicts stock direction using 30+ technical indicators, FinBERT news sentiment, and XGBoost classification, backtested against S&P 500 and equal-weight benchmarks with realistic transaction costs.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![LightGBM](https://img.shields.io/badge/LightGBM-4.0+-brightgreen?style=flat)](https://lightgbm.readthedocs.io/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-1.7+-EE2E24?style=flat)](https://xgboost.readthedocs.io/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-LSTM-EE4C2C?style=flat&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![FinBERT](https://img.shields.io/badge/FinBERT-ProsusAI-yellow?style=flat)](https://huggingface.co/ProsusAI/finbert)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat)](https://opensource.org/licenses/MIT)
 
-![Backtest Results](realistic_backtest.png)
+![Backtest Results](assets/realistic_backtest.png)
 
 </div>
 
@@ -48,11 +51,11 @@ Most stock prediction projects fall into common traps:
 
 This project was built to avoid all of these. The approach:
 
-1. **Diverse universe** — Include winners (NVDA, META), average performers (JNJ, PG), and underperformers (INTC, BA) to avoid survivorship bias
-2. **Walk-forward validation** — Retrain the model every 10 trading days on a sliding 5-year window, simulating real-world deployment
-3. **Honest benchmarks** — Compare against S&P 500 buy-and-hold AND an equal-weight portfolio of the same stocks
-4. **Real costs** — 0.1% transaction cost on every trade
-5. **Classification over regression** — Predict "will this stock go UP or DOWN in 10 days?" rather than exact price, which is far more reliable
+1. **Diverse universe**, Include winners (NVDA, META), average performers (JNJ, PG), and underperformers (INTC, BA) to avoid survivorship bias
+2. **Walk-forward validation**, Retrain the model every 10 trading days on a sliding 5-year window, simulating real-world deployment
+3. **Honest benchmarks**, Compare against S&P 500 buy-and-hold AND an equal-weight portfolio of the same stocks
+4. **Real costs**, 0.1% transaction cost on every trade
+5. **Classification over regression**, Predict "will this stock go UP or DOWN in 10 days?" rather than exact price, which is far more reliable
 
 ---
 
@@ -150,50 +153,50 @@ The model uses 30+ features organized into 5 categories, informed by research on
 ### Trend & Moving Averages (13 features)
 | Indicator | What It Measures |
 |-----------|-----------------|
-| SMA (20, 50) | Simple moving average — baseline trend direction |
-| EMA (20, 50) | Exponential MA — more responsive to recent price |
-| TEMA (20) | Triple EMA — near-zero lag, catches trend changes early |
-| HMA (20) | Hull MA — smooth curve with minimal lag |
-| HWMA (20) | Holt-Winter MA — captures both level and trend |
-| KAMA (10) | Kaufman Adaptive MA — flat in sideways markets, fast in trends |
-| FWMA (20) | Fibonacci Weighted MA — recent prices weighted by Fibonacci sequence |
-| SWMA (20) | Sine Weighted MA — smooths edges with sine function |
-| Ichimoku Cloud (9/26/52) | Japanese trend system — Tenkan/Kijun cross, Cloud as support/resistance |
-| EMA Crossover | EMA20 - EMA50 — golden/death cross signal |
+| SMA (20, 50) | Simple moving average, baseline trend direction |
+| EMA (20, 50) | Exponential MA, more responsive to recent price |
+| TEMA (20) | Triple EMA, near-zero lag, catches trend changes early |
+| HMA (20) | Hull MA, smooth curve with minimal lag |
+| HWMA (20) | Holt-Winter MA, captures both level and trend |
+| KAMA (10) | Kaufman Adaptive MA, flat in sideways markets, fast in trends |
+| FWMA (20) | Fibonacci Weighted MA, recent prices weighted by Fibonacci sequence |
+| SWMA (20) | Sine Weighted MA, smooths edges with sine function |
+| Ichimoku Cloud (9/26/52) | Japanese trend system, Tenkan/Kijun cross, Cloud as support/resistance |
+| EMA Crossover | EMA20 - EMA50, golden/death cross signal |
 | Price vs SMA/KAMA | Distance from key moving averages |
 
 ### Momentum Oscillators (7 features)
 | Indicator | What It Measures |
 |-----------|-----------------|
 | RSI (14) | Overbought (>70) / oversold (<20) conditions |
-| RSI Change | Momentum of RSI — rising = bullish, falling = bearish |
-| MACD (12/26/9) | Trend-following momentum — signal line crossovers |
+| RSI Change | Momentum of RSI, rising = bullish, falling = bearish |
+| MACD (12/26/9) | Trend-following momentum, signal line crossovers |
 | Stochastic (14/3/3) | Price position relative to high/low range |
-| RVI (14) | Relative Vigor Index — conviction of price moves |
-| MFI (14) | Money Flow Index — RSI weighted by volume |
+| RVI (14) | Relative Vigor Index, conviction of price moves |
+| MFI (14) | Money Flow Index, RSI weighted by volume |
 
 ### Volatility (5 features)
 | Indicator | What It Measures |
 |-----------|-----------------|
-| Bollinger Bands | Upper/lower bands around SMA — overbought/oversold |
-| BB Width | Band width normalized by price — volatility expansion/contraction |
-| ATR (14) | Average True Range — magnitude of daily price swings |
+| Bollinger Bands | Upper/lower bands around SMA, overbought/oversold |
+| BB Width | Band width normalized by price, volatility expansion/contraction |
+| ATR (14) | Average True Range, magnitude of daily price swings |
 | Volatility (10/20/50d) | Standard deviation of returns at multiple timeframes |
 
 ### Volume (5 features)
 | Indicator | What It Measures |
 |-----------|-----------------|
-| Relative Volume (10/20/50d) | Today's volume vs average — unusual activity detection |
-| OBV | On-Balance Volume — accumulates volume on up days |
-| PVT | Price Volume Trend — volume weighted by price change magnitude |
+| Relative Volume (10/20/50d) | Today's volume vs average, unusual activity detection |
+| OBV | On-Balance Volume, accumulates volume on up days |
+| PVT | Price Volume Trend, volume weighted by price change magnitude |
 
 ### Returns & Context (5 features)
 | Indicator | What It Measures |
 |-----------|-----------------|
 | Returns (1/5/20d) | Percentage price changes at multiple timeframes |
-| 52-Week High Distance | % below rolling yearly high — momentum/reversion signal |
-| S&P 500 Correlation | 20-day rolling correlation — stock vs market |
-| HLC3 | Average of High, Low, Close — smoother price proxy |
+| 52-Week High Distance | % below rolling yearly high, momentum/reversion signal |
+| S&P 500 Correlation | 20-day rolling correlation, stock vs market |
+| HLC3 | Average of High, Low, Close, smoother price proxy |
 
 ### Feature Interactions
 | Feature | What It Measures |
@@ -225,7 +228,7 @@ Finnhub API → Company News (last 30 days)
 | `Sentiment_Std` | 5-day rolling standard deviation of sentiment |
 
 ### FinBERT
-Sentiment analysis uses **FinBERT** (ProsusAI/finbert), a BERT model pre-trained on financial text. It classifies news headlines into positive/negative/neutral with ~80-85% accuracy on financial data — significantly better than general-purpose sentiment tools like VADER.
+Sentiment analysis uses **FinBERT** (ProsusAI/finbert), a BERT model pre-trained on financial text. It classifies news headlines into positive/negative/neutral with ~80-85% accuracy on financial data, significantly better than general-purpose sentiment tools like VADER.
 
 ---
 
@@ -236,13 +239,13 @@ The model is a **binary classifier**: it predicts whether a stock's price will g
 
 | Parameter | Value | Why |
 |-----------|-------|-----|
-| `n_estimators` | 50 | Conservative — avoids memorizing training data |
-| `max_depth` | 2 | Very shallow trees — prevents overfitting |
-| `learning_rate` | 0.05 | Slow learning — more careful generalization |
-| `min_child_weight` | 30 | High threshold — requires strong evidence to split |
-| `gamma` | 0.5 | Minimum loss reduction for split — conservative |
-| `subsample` | 0.6 | Use 60% of data per tree — reduces variance |
-| `colsample_bytree` | 0.5 | Use 50% of features per tree — decorrelates trees |
+| `n_estimators` | 50 | Conservative, avoids memorizing training data |
+| `max_depth` | 2 | Very shallow trees, prevents overfitting |
+| `learning_rate` | 0.05 | Slow learning, more careful generalization |
+| `min_child_weight` | 30 | High threshold, requires strong evidence to split |
+| `gamma` | 0.5 | Minimum loss reduction for split, conservative |
+| `subsample` | 0.6 | Use 60% of data per tree, reduces variance |
+| `colsample_bytree` | 0.5 | Use 50% of features per tree, decorrelates trees |
 
 > These deliberately conservative parameters were chosen after diagnostic testing
 > showed that default XGBoost overfits badly (95% train accuracy vs 54% test accuracy).
@@ -250,7 +253,7 @@ The model is a **binary classifier**: it predicts whether a stock's price will g
 
 ### Why Classification Instead of Regression
 Predicting "up or down" is more reliable than predicting exact price because:
-- Stock prices are inherently noisy — small errors in regression compound exponentially
+- Stock prices are inherently noisy, small errors in regression compound exponentially
 - Classification captures the **direction** which is what matters for trading
 - Binary targets are more robust to outliers and regime changes
 
@@ -260,7 +263,7 @@ Predicting "up or down" is more reliable than predicting exact price because:
 | Accuracy | % of correct predictions (baseline: ~50% for balanced data) |
 | Precision | Of all "UP" predictions, how many were correct? |
 | Recall | Of all actual "UP" days, how many did we catch? |
-| F1-Score | Harmonic mean of precision and recall — balanced metric |
+| F1-Score | Harmonic mean of precision and recall, balanced metric |
 
 ---
 
@@ -300,9 +303,9 @@ The stock universe includes **4 categories** to avoid survivorship bias:
 ### Benchmarks
 | Benchmark | What It Tests |
 |-----------|--------------|
-| **Equal-Weight** | Best passive strategy — buy everything equally |
-| **S&P 500** | Market return — the standard benchmark |
-| **Random Top N** | Minimum skill threshold — random stock picking |
+| **Equal-Weight** | Best passive strategy, buy everything equally |
+| **S&P 500** | Market return, the standard benchmark |
+| **Random Top N** | Minimum skill threshold, random stock picking |
 
 The key metric is **True Alpha** = Model Return − Equal-Weight Return. This measures whether the model adds value beyond simply holding everything.
 
@@ -316,22 +319,22 @@ The key metric is **True Alpha** = Model Return − Equal-Weight Return. This me
 Strategy                   Final Value     Return    Alpha vs EW
 ─────────────────────────────────────────────────────────────────
 Model (Top 5)              $76,305       +663.0%     +259.6%
-Equal-Weight (All)         $50,341       +403.4%         —
-S&P 500                    $32,702       +227.0%         —
-Random (Top 5)              $5,514        -44.9%         —
+Equal-Weight (All)         $50,341       +403.4%         -
+S&P 500                    $32,702       +227.0%         -
+Random (Top 5)              $5,514        -44.9%         -
 ```
 
 ### Key Findings
 
 1. **The model beats the market**: +663% vs S&P 500 +227% over 10 years
-2. **The model beats equal-weight**: +260% alpha — genuine stock selection skill
+2. **The model beats equal-weight**: +260% alpha, genuine stock selection skill
 3. **Random fails**: -44.9% confirms that picking stocks randomly loses money
 4. **Survived 2022 bear market**: Model was defensive (picked WMT, T, PFE) and preserved capital
 
 ### Model Behavior Analysis
 - **59% win rate** on picked stocks (vs 50% random chance)
-- **Average +1.44% per 10-day pick** — small but consistent edge
-- When winning: avg **+5.32%** | When losing: avg **-4.15%** — asymmetric payoff
+- **Average +1.44% per 10-day pick**, small but consistent edge
+- When winning: avg **+5.32%** | When losing: avg **-4.15%**, asymmetric payoff
 - Model naturally rotates between **growth** (bull market) and **value/defensive** (uncertain times)
 
 ---
@@ -366,7 +369,7 @@ FINNHUB_API_KEY=your_api_key_here
 
 ### Prerequisites
 - Python 3.10+
-- Finnhub API key (free tier works — [get one here](https://finnhub.io/register))
+- Finnhub API key (free tier works, [get one here](https://finnhub.io/register))
 
 ### Installation
 
@@ -473,7 +476,7 @@ From commit 5 onward, the project was developed collaboratively with AI assistan
 #### Phase 3: Overfitting Fix & Research Integration (Commits 13-15)
 
 **The overfitting problem:**
-Initial XGBoost returned +55,713% — clearly unrealistic. Diagnostic testing revealed:
+Initial XGBoost returned +55,713%, clearly unrealistic. Diagnostic testing revealed:
 - XGBoost train accuracy: 95% vs test accuracy: 54% → **41% overfit gap**
 - Model was memorizing training patterns that didn't generalize
 
@@ -485,13 +488,13 @@ Initial XGBoost returned +55,713% — clearly unrealistic. Diagnostic testing re
 
 **Research integration:**
 Studied an ML paper on S&P 500 prediction that found 5 universal top indicators. Added 13 missing indicators:
-- **HLC3, TEMA, FWMA** — better moving averages than SMA
-- **OBV, PVT, MFI** — volume-based features with more signal
-- **RVI, KAMA, SWMA** — momentum and adaptive indicators
-- **EMA, HMA, HWMA** — responsive trend indicators
-- **Ichimoku Cloud** — Japanese trend system (manually implemented)
+- **HLC3, TEMA, FWMA**, better moving averages than SMA
+- **OBV, PVT, MFI**, volume-based features with more signal
+- **RVI, KAMA, SWMA**, momentum and adaptive indicators
+- **EMA, HMA, HWMA**, responsive trend indicators
+- **Ichimoku Cloud**, Japanese trend system (manually implemented)
 
-**Result:** Alpha dropped from +513% to +260% — more realistic edge. Model now picks defensive stocks during downturns instead of riding tech momentum.
+**Result:** Alpha dropped from +513% to +260%, more realistic edge. Model now picks defensive stocks during downturns instead of riding tech momentum.
 
 ---
 
@@ -546,3 +549,27 @@ Built as a learning project to understand ML, technical analysis, and backtestin
 Commits 1-4: Solo development | Commits 5+: AI-assisted with [opencode](https://opencode.ai)
 
 </div>
+
+---
+
+<details>
+<summary><b>🇵🇹 Resumo do Projeto em Português</b></summary>
+
+### 📈 Stock Predictor: Seleção de Ações com Machine Learning Adaptativo
+
+Pipeline de Machine Learning e finanças quantitativas concebido para testar se modelos preditivos conseguem bater uma estratégia passiva (*Equal-Weight* e S&P 500) com custos de transação e slippage reais.
+
+#### 💡 Conceito & Metodologia
+* **Problema:** Em vez de tentar adivinhar o preço exato (regressão), o modelo resolve um problema de **classificação binária**: prever se a ação vai subir ou descer nos próximos 10 dias de negociação.
+* **Validação Walk-Forward:** O modelo é retreinado a cada 10 dias usando uma janela deslizante de 5 anos, simulando a tomada de decisão real sem fugas de informação futura (*lookahead bias*).
+* **Custos Reais de Mercado:** Taxa de transação de 0.3% e slippage de 0.05% aplicados sobre o capital transacionado a cada rebalanceamento.
+
+#### 🛠️ Stack Tecnológica & Modelos
+* **Engenharia de Variáveis:** Mais de 30 indicadores técnicos (RSI, Médias Móveis Adaptativas KAMA, Bandas de Bollinger, ATR, Estocástico, OBV, MFI) calculados com `pandas_ta`.
+* **Modelos:** LightGBM e XGBoost (árvores pouco profundas com regularização para evitar overfitting ao ruído de mercado) e módulo experimental de LSTM em PyTorch.
+* **Análise de Sentimento (FinBERT):** Processamento de notícias via Finnhub para extração de sentimento textual.
+
+#### 🧠 Aprendizagens de Engenharia
+* **Árvores de Decisão vs. Redes Recorrentes (LSTM):** Em dados tabulares financeiros diários, modelos de gradient boosting (LightGBM/XGBoost) são ordens de grandeza mais rápidos e sofrem muito menos de overfitting do que redes neurais complexas como LSTMs.
+* **A Importância dos Benchmarks:** Bater o S&P 500 não basta se o universo for composto por ações tecnológicas voláteis; o verdadeiro teste de mérito é bater o portfólio *Equal-Weight* das mesmas ações.
+</details>

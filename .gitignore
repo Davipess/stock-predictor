@@ -16,6 +16,7 @@ build/
 # Environment variables
 .env
 *.env
+!.env.example
 
 # IDE
 .vscode/
@@ -27,15 +28,13 @@ build/
 .DS_Store
 Thumbs.db
 
-# Project specific
-backtest_results.png
-backtest_multistock.png
-portfolio_manager.png
-realistic_backtest.png
+# Models & Checkpoints
 *.pkl
 *.h5
 
-# API Keys (NEVER commit these)
-.env
+# Root generated output plots (tracked copies live in assets/)
+/*.png
+
+# Sensitive files
 secrets.py
 credentials.json
